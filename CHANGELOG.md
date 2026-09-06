@@ -2,6 +2,20 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 的结构。
 
+## [Unreleased]
+
+### Added
+
+- Calibrated gyroscope、magnetometer 和 Game Rotation Vector 报告解析与 Getter。
+- STM32 SPI DMA 平台适配 API 和 `BNO085_PollAsync()` 非阻塞收包状态机。
+- DMA 报告速率与核心处理 CPU 时间的实机统计。
+
+### Changed
+
+- 示例同时请求 RV/Game RV/Accelerometer/Gyroscope 100 Hz 和 Magnetometer 25 Hz。
+- 将事件、打印、统计和恢复逻辑封装为静态 `bno085_process()`。
+- 取消示例内强制 `WFI`；DMA 未就绪时立即返回，休眠策略由上层应用决定。
+
 ## [0.1.0] - 2026-09-06
 
 ### Added

@@ -5,8 +5,8 @@
  *        BNO085 核心驱动所依赖的、与 MCU 无关的硬件接口契约。
  *
  * Porting rule / 移植原则:
- * Keep bno085.c unchanged and implement these eight functions for the new MCU.
- * 保持 bno085.c 不变，只为新 MCU 实现下面八个函数。
+ * Keep bno085.c unchanged and implement these functions for the new MCU.
+ * 保持 bno085.c 不变，只为新 MCU 实现下面这些函数。
  */
 #ifndef BNO085_PORT_H
 #define BNO085_PORT_H
@@ -28,6 +28,27 @@ bool BNO085_Port_IsReady(void);
  */
 bool BNO085_Port_SPITransfer(const uint8_t *tx, uint8_t *rx,
                             uint16_t length, uint32_t timeout_ms);
+
+/** State of one interrupt/DMA SPI transfer. / 一次中断或 DMA SPI 传输的状态。 */
+typedef enum {
+    BNO085_PORT_ASYNC_IDLE = 0,
+    BNO085_PORT_ASYNC_BUSY,
+    BNO085_PORT_ASYNC_COMPLETE,
+    BNO085_PORT_ASYNC_ERROR
+} BNO085_PortAsyncStatus_t;
+
+/**
+ * Start one non-blocking full-duplex transfer while CS is already active.
+ * 在 CS 已拉低时启动一次非阻塞全双工传输。
+ */
+bool BNO085_Port_SPITransferAsync(const uint8_t *tx, uint8_t *rx,
+                                 uint16_t length);
+
+/** Query the transfer without waiting. / 查询异步传输状态，不等待。 */
+BNO085_PortAsyncStatus_t BNO085_Port_SPITransferAsyncStatus(void);
+
+/** Abort a pending async transfer during reset/recovery. / 复位恢复时终止异步传输。 */
+void BNO085_Port_SPITransferAsyncAbort(void);
 
 /** Assert/deassert active-low H_CSN. / 拉低或释放 H_CSN。 */
 void BNO085_Port_SetChipSelect(bool asserted);

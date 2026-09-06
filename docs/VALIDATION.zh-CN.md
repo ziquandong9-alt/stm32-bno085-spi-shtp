@@ -17,7 +17,7 @@
 ## 构建结果
 
 ```text
-Program Size: Code=15756 RO-data=448 RW-data=52 ZI-data=2084
+Program Size: Code=21252 RO-data=524 RW-data=108 ZI-data=2364
 "BNO085\BNO085.axf" - 0 Error(s), 0 Warning(s).
 ```
 
@@ -32,13 +32,18 @@ MCU Reset
 ## 串口结果
 
 ```text
+BNO085 demo boot (SPI DMA)
 BNO085 part 10004148, FW 3.2.13, build 6, reset 4
-ACC: x=  8.01 y= -2.84 z= -5.02 m/s^2
-BNO085 rotation vector and accelerometer running at 100 Hz
+GYRO: x= 0.000 y= 0.002 z=-0.004 rad/s acc=0
+MAG: x=-20.88 y=-34.13 z=-15.13 uT acc=0
+BNO085 DMA stream: RV/GAME/ACC/GYRO=100 Hz, MAG=25 Hz
 YPR: yaw=... roll=... pitch=... deg
+RATE/s: rv=100 game=100 acc=123 gyro=100 mag=25
 ```
 
-结果：2.625 MHz SPI 下 Product ID、加速度和 Rotation Vector 均正常；YPR 持续约 100 Hz
-输出，观察窗口内未出现 timeout、invalid report 或自动重启。
+结果：2.625 MHz SPI DMA 下 Product ID 和 5 种报告均正常；RV、Game RV、
+Gyroscope 稳定在约 100 Hz，Magnetometer 稳定在约 25 Hz；Accelerometer
+虽请求 100 Hz，当前样机实测约 120–128 Hz。DMA 未完成时服务函数立即返回，
+观察窗口内未出现 timeout、invalid report 或自动重启。
 
 说明：这是当前硬件组合的验证记录，不代表所有模块、线长和供电条件都能直接使用 2.625 MHz。

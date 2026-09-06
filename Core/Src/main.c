@@ -37,6 +37,8 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define BNO085_REPORT_INTERVAL_US  10000U
+#define BNO085_MAG_INTERVAL_US     40000U
+#define BNO085_YPR_PRINT_DIVIDER       4U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -52,19 +54,27 @@ static uint32_t last_rotation_ms;
 static float yaw_deg;
 static float roll_deg;
 static float pitch_deg;
+static uint32_t rv_events_per_second;
+static uint32_t game_events_per_second;
+static uint32_t accel_events_per_second;
+static uint32_t gyro_events_per_second;
+static uint32_t mag_events_per_second;
+static uint32_t stats_start_ms;
+static uint32_t ypr_print_divider;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 static void BNO085_Start(void);
+static void bno085_process(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 /**
-  * @brief Configure, identify and start both required SH-2 reports.
-  *        配置平台层、读取产品信息，并启动姿态和加速度报告。
+ * @brief Configure, identify and start all demo SH-2 reports.
+ *        配置平台层、读取产品信息，并启动示例所需的全部报告。
   *
   * This function retries the complete sequence after any startup failure.
   * 任一步启动失败都会延时后重新执行完整初始化流程。
@@ -124,6 +134,36 @@ static void BNO085_Start(void)
            product_info.build_number,
            product_info.reset_cause);
 
+    /* Enable the lower-rate magnetic report first.  Subsequent Set Feature
+       writes can then fit into gaps between sensor packets more reliably.
+       先启用低速磁场报告，让后续配置命令更容易落在报告间隙中。 */
+    status = BNO085_EnableMagnetometer(BNO085_MAG_INTERVAL_US);
+    if (status != BNO085_OK)
+    {
+      printf("BNO085 magnetometer enable failed: %s (%d)\r\n",
+             BNO085_StatusString(status), status);
+      HAL_Delay(1000U);
+      continue;
+    }
+
+    status = BNO085_EnableGyroscope(BNO085_REPORT_INTERVAL_US);
+    if (status != BNO085_OK)
+    {
+      printf("BNO085 gyroscope enable failed: %s (%d)\r\n",
+             BNO085_StatusString(status), status);
+      HAL_Delay(1000U);
+      continue;
+    }
+
+    status = BNO085_EnableGameRotationVector(BNO085_REPORT_INTERVAL_US);
+    if (status != BNO085_OK)
+    {
+      printf("BNO085 game rotation vector enable failed: %s (%d)\r\n",
+             BNO085_StatusString(status), status);
+      HAL_Delay(1000U);
+      continue;
+    }
+
     /* Set Feature interval is in microseconds: 10000 us = 100 Hz.
        Set Feature 周期单位为微秒：10000 us 即 100 Hz。 */
     status = BNO085_EnableAccelerometer(BNO085_REPORT_INTERVAL_US);
@@ -145,8 +185,8 @@ static void BNO085_Start(void)
     }
 
     /* Do not regard a successful Set Feature write as proof of sensor output.
-       Wait until both report types have actually been decoded and cached.
-       Set Feature 写成功不等于已有数据，必须真正收到两种报告后才算启动成功。 */
+       Wait until every enabled report has actually been decoded and cached.
+       Set Feature 写成功不等于已有数据，所有已启用报告都真正到达后才算启动成功。 */
     {
       uint32_t start_ms = HAL_GetTick();
       uint32_t events = 0U;
@@ -154,6 +194,15 @@ static void BNO085_Start(void)
       float accel_x;
       float accel_y;
       float accel_z;
+      BNO085_Gyroscope_t gyro;
+      BNO085_Magnetometer_t mag;
+      BNO085_Euler_t game_euler;
+      const uint32_t required_events =
+          BNO085_EVENT_ROTATION_VECTOR |
+          BNO085_EVENT_GAME_ROTATION_VECTOR |
+          BNO085_EVENT_ACCELEROMETER |
+          BNO085_EVENT_GYROSCOPE |
+          BNO085_EVENT_MAGNETOMETER;
 
       do
       {
@@ -164,11 +213,8 @@ static void BNO085_Start(void)
           seen_events |= events;
         }
       } while ((status == BNO085_OK) &&
-               ((seen_events & (BNO085_EVENT_ROTATION_VECTOR |
-                                BNO085_EVENT_ACCELEROMETER)) !=
-                (BNO085_EVENT_ROTATION_VECTOR |
-                 BNO085_EVENT_ACCELEROMETER)) &&
-               ((uint32_t)(HAL_GetTick() - start_ms) < 1000U));
+               ((seen_events & required_events) != required_events) &&
+               ((uint32_t)(HAL_GetTick() - start_ms) < 2000U));
 
       /* These six calls read cache only; no additional SPI transactions.
          这六个 Getter 只读缓存，不会再次访问 SPI。 */
@@ -178,10 +224,20 @@ static void BNO085_Start(void)
           (BNO085_GetPitch(&pitch_deg) == BNO085_OK) &&
           (BNO085_GetAccelerationX(&accel_x) == BNO085_OK) &&
           (BNO085_GetAccelerationY(&accel_y) == BNO085_OK) &&
-          (BNO085_GetAccelerationZ(&accel_z) == BNO085_OK))
+          (BNO085_GetAccelerationZ(&accel_z) == BNO085_OK) &&
+          (BNO085_GetGyroscope(&gyro) == BNO085_OK) &&
+          (BNO085_GetMagnetometer(&mag) == BNO085_OK) &&
+          (BNO085_GetGameEuler(&game_euler) == BNO085_OK))
       {
         printf("ACC: x=%6.2f y=%6.2f z=%6.2f m/s^2\r\n",
                accel_x, accel_y, accel_z);
+        printf("GYRO: x=%6.3f y=%6.3f z=%6.3f rad/s acc=%u\r\n",
+               gyro.x_rps, gyro.y_rps, gyro.z_rps, gyro.accuracy);
+        printf("MAG: x=%6.2f y=%6.2f z=%6.2f uT acc=%u\r\n",
+               mag.x_uT, mag.y_uT, mag.z_uT, mag.accuracy);
+        printf("GAME YPR: yaw=%7.2f roll=%7.2f pitch=%7.2f deg\r\n",
+               game_euler.yaw_deg, game_euler.roll_deg,
+               game_euler.pitch_deg);
       }
       else if (status == BNO085_OK)
       {
@@ -191,14 +247,106 @@ static void BNO085_Start(void)
 
     if (status == BNO085_OK)
     {
-      printf("BNO085 rotation vector and accelerometer running at 100 Hz\r\n");
+      printf("BNO085 DMA stream: RV/GAME/ACC/GYRO=100 Hz, MAG=25 Hz\r\n");
       last_rotation_ms = HAL_GetTick();
+      stats_start_ms = last_rotation_ms;
+      rv_events_per_second = 0U;
+      game_events_per_second = 0U;
+      accel_events_per_second = 0U;
+      gyro_events_per_second = 0U;
+      mag_events_per_second = 0U;
+      ypr_print_divider = 0U;
       return;
     }
 
-    printf("BNO085 produced no rotation data: %s (%d)\r\n",
+    printf("BNO085 produced no required sensor data: %s (%d)\r\n",
            BNO085_StatusString(status), status);
     HAL_Delay(1000U);
+  }
+}
+
+/**
+ * @brief Advance BNO085 DMA I/O and handle all application-level events.
+ *        推进 BNO085 DMA 收包，并集中处理数据、统计和故障恢复。
+ *
+ * This function never waits for SPI completion.  When DMA is not ready,
+ * BNO085_PollAsync() returns BNO085_PENDING and the caller can immediately
+ * continue with other application work.
+ * 本函数不等待 SPI；DMA 尚未完成时立即返回，主循环可继续处理其他任务。
+ */
+static void bno085_process(void)
+{
+  uint32_t events = 0U;
+  BNO085_Status_t status = BNO085_PollAsync(&events);
+
+  if ((status != BNO085_OK) && (status != BNO085_PENDING))
+  {
+    printf("BNO085 read failed: %s (%d)\r\n",
+           BNO085_StatusString(status), status);
+  }
+
+  /* Count decoded reports for a simple one-second hardware sanity check.
+     统计每秒报告数，直接验证 Set Feature 与 DMA 收包是否正常。 */
+  if ((events & BNO085_EVENT_ACCELEROMETER) != 0U) accel_events_per_second++;
+  if ((events & BNO085_EVENT_GYROSCOPE) != 0U) gyro_events_per_second++;
+  if ((events & BNO085_EVENT_MAGNETOMETER) != 0U) mag_events_per_second++;
+  if ((events & BNO085_EVENT_GAME_ROTATION_VECTOR) != 0U) game_events_per_second++;
+
+  if ((status == BNO085_OK) &&
+      ((events & BNO085_EVENT_ROTATION_VECTOR) != 0U) &&
+      (BNO085_GetYaw(&yaw_deg) == BNO085_OK) &&
+      (BNO085_GetRoll(&roll_deg) == BNO085_OK) &&
+      (BNO085_GetPitch(&pitch_deg) == BNO085_OK))
+  {
+    /* All three angles belong to one cached rotation-vector frame.
+       三个角度均来自同一帧缓存。 */
+    last_rotation_ms = HAL_GetTick();
+    rv_events_per_second++;
+    ypr_print_divider++;
+    if (ypr_print_divider >= BNO085_YPR_PRINT_DIVIDER)
+    {
+      ypr_print_divider = 0U;
+      printf("YPR: yaw=%7.2f roll=%7.2f pitch=%7.2f deg\r\n",
+             yaw_deg, roll_deg, pitch_deg);
+    }
+  }
+
+  if ((uint32_t)(HAL_GetTick() - stats_start_ms) >= 1000U)
+  {
+    BNO085_Gyroscope_t gyro;
+    BNO085_Magnetometer_t mag;
+    BNO085_Euler_t game_euler;
+
+    printf("RATE/s: rv=%lu game=%lu acc=%lu gyro=%lu mag=%lu\r\n",
+           rv_events_per_second, game_events_per_second,
+           accel_events_per_second, gyro_events_per_second,
+           mag_events_per_second);
+    if ((BNO085_GetGyroscope(&gyro) == BNO085_OK) &&
+        (BNO085_GetMagnetometer(&mag) == BNO085_OK) &&
+        (BNO085_GetGameEuler(&game_euler) == BNO085_OK))
+    {
+      printf("GYRO[%u]: %6.3f %6.3f %6.3f rad/s  MAG[%u]: %6.2f %6.2f %6.2f uT\r\n",
+             gyro.accuracy, gyro.x_rps, gyro.y_rps, gyro.z_rps,
+             mag.accuracy, mag.x_uT, mag.y_uT, mag.z_uT);
+      printf("GAME YPR: yaw=%7.2f roll=%7.2f pitch=%7.2f deg\r\n",
+             game_euler.yaw_deg, game_euler.roll_deg,
+             game_euler.pitch_deg);
+    }
+    stats_start_ms = HAL_GetTick();
+    rv_events_per_second = 0U;
+    game_events_per_second = 0U;
+    accel_events_per_second = 0U;
+    gyro_events_per_second = 0U;
+    mag_events_per_second = 0U;
+  }
+
+  /* Other reports may continue while Rotation Vector stalls, so recovery is
+     based specifically on the last Rotation Vector event.
+     其他报告仍可能到达，故恢复仅以最后姿态帧为准。 */
+  if ((uint32_t)(HAL_GetTick() - last_rotation_ms) >= 1000U)
+  {
+    printf("BNO085: no rotation data for 1 second, restarting\r\n");
+    BNO085_Start();
   }
 }
 /* USER CODE END 0 */
@@ -232,8 +380,9 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_SPI1_Init();
   MX_USART1_UART_Init();
+  MX_SPI1_Init();
+  printf("BNO085 demo boot (SPI DMA)\r\n");
   /* USER CODE BEGIN 2 */
   BNO085_Start();
   /* USER CODE END 2 */
@@ -242,37 +391,9 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    uint32_t events = 0U;
-    /* Poll is the sole streaming I/O entry.  It drains one useful cargo,
-       parses every sub-report, updates caches, and returns event bits.
-       Poll 是流式阶段唯一 I/O 入口：收包、遍历子报告、更新缓存并返回事件位。 */
-    BNO085_Status_t status = BNO085_Poll(200U, &events);
-
-    if ((status == BNO085_OK) &&
-        ((events & BNO085_EVENT_ROTATION_VECTOR) != 0U) &&
-        (BNO085_GetYaw(&yaw_deg) == BNO085_OK) &&
-        (BNO085_GetRoll(&roll_deg) == BNO085_OK) &&
-        (BNO085_GetPitch(&pitch_deg) == BNO085_OK))
-    {
-      /* The three values belong to the same cached rotation-vector frame.
-         三个角度均来自同一帧缓存。 */
-      last_rotation_ms = HAL_GetTick();
-      printf("YPR: yaw=%7.2f roll=%7.2f pitch=%7.2f deg\r\n",
-             yaw_deg, roll_deg, pitch_deg);
-    }
-    else if ((status != BNO085_OK) && (status != BNO085_ERR_TIMEOUT))
-    {
-      printf("BNO085 read failed: %s (%d)\r\n",
-             BNO085_StatusString(status), status);
-    }
-
-    /* Acceleration may continue while rotation stalls, so recovery is based
-       specifically on the last rotation event. / 仅以最后姿态事件判断恢复。 */
-    if ((uint32_t)(HAL_GetTick() - last_rotation_ms) >= 1000U)
-    {
-      printf("BNO085: no rotation data for 1 second, restarting\r\n");
-      BNO085_Start();
-    }
+    /* Non-blocking service: unfinished DMA returns immediately.
+       非阻塞服务：DMA 未完成就立即返回。 */
+    bno085_process();
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */

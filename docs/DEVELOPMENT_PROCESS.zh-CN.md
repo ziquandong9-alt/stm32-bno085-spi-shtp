@@ -126,7 +126,7 @@ BNO085_GetAccelerationX/Y/Z()
 早期核心驱动直接保存 `SPI_HandleTypeDef` 和 GPIO 端口，换 MCU 就必须修改协议代码。重构后分为：
 
 - `bno085.c`：只理解 SHTP/SH-2。
-- `bno085_port.h`：规定核心需要的 8 个硬件操作。
+- `bno085_port.h`：规定核心需要的阻塞/异步 SPI、GPIO 和时基操作。
 - `bno085_port_stm32.c`：唯一调用 `HAL_SPI_*`、`HAL_GPIO_*`、`HAL_GetTick()` 的文件。
 
 这一步的判断标准很简单：在 `bno085.c`、`bno085.h` 和 `bno085_port.h` 中搜索 `HAL_` 或
@@ -137,14 +137,16 @@ BNO085_GetAccelerationX/Y/Z()
 完成正确性后才提速：
 
 - SPI1 从 656.25 kHz 提升到 2.625 MHz，低于 BNO085 的 3 MHz 上限。
-- 32 字节小块读取改为最多 260 字节，减少 HAL 函数调用。
+- SPI DMA 分别读取 4 字节包头和 cargo，两段期间保持 CS 连续为低。
+- `BNO085_PollAsync()` 以状态机取代流式阶段的阻塞等待。
 - 大收发缓冲静态复用，降低栈占用。
 - 每个 cargo 只扫描一次，每个 Rotation Vector 只计算一次欧拉角。
 - Getter 只读缓存。
 
-没有为了“看起来快”直接上 DMA，因为同步版首先要把协议边界做对。下一阶段若需要更低 CPU
-占用，应优先加入 H_INTN EXTI、SPI DMA 和 UART DMA。特别是当前 100 Hz 浮点串口打印，通常比
-一次 2.625 MHz SPI 读取占用更多时间。
+同步版把协议边界验证正确后，再加入 H_INTN EXTI 和 SPI DMA。
+`BNO085_PollAsync()` 在 DMA 未完成时立即返回，不把上层绑定到 `WFI` 或任何
+特定调度方式。下一个主要瓶颈是阻塞式 UART `printf`，控制环应用可再
+换成 UART DMA 环形缓冲。
 
 ## 9. 验证顺序
 
@@ -154,10 +156,11 @@ BNO085_GetAccelerationX/Y/Z()
 2. ARM Compiler 5 全量重编译，必须 `0 Error(s), 0 Warning(s)`。
 3. STM32CubeProgrammer 下载并 verify。
 4. 使用调试串口抓取完整启动信息。
-5. 确认 Product ID、加速度、100 Hz YPR 连续出现。
+5. 确认 Product ID、YPR 和五种报告的每秒计数连续出现。
 6. 观察是否出现 timeout、invalid report 或自动重启。
 
-最终板上同时启用 Rotation Vector 和 accelerometer，在 2.625 MHz SPI 下稳定输出 100 Hz YPR。
+最终板上同时启用 5 种报告，在 2.625 MHz SPI DMA 下稳定获取
+100 Hz Rotation Vector，示例为减少 UART 阻塞每 4 帧打印一次 YPR。
 
 ## 10. 这次最值得保留的方法
 

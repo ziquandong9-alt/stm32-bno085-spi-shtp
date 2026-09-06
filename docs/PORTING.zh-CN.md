@@ -17,6 +17,9 @@
 |---|---|
 | `BNO085_Port_IsReady` | 平台初始化完成后返回 `true` |
 | `BNO085_Port_SPITransfer` | 阻塞式全双工 SPI；成功返回 `true` |
+| `BNO085_Port_SPITransferAsync` | 启动一次中断或 DMA 全双工 SPI，不等待完成 |
+| `BNO085_Port_SPITransferAsyncStatus` | 返回异步 SPI 的 idle/busy/complete/error 状态 |
+| `BNO085_Port_SPITransferAsyncAbort` | 复位或恢复时终止未完成异步传输 |
 | `BNO085_Port_SetChipSelect` | `true` 将 H_CSN 拉低 |
 | `BNO085_Port_SetWake` | `true` 将 WAKE/PS0 拉低 |
 | `BNO085_Port_SetReset` | `true` 将 NRST 拉低 |
@@ -32,15 +35,17 @@ MOSI dummy byte 必须为 `0x00`；该细节已由核心层处理。
 1. 复制 `bno085_port_stm32.h/.c` 为新平台文件并替换其中的 HAL 类型和调用。
 2. 在应用初始化 SPI/GPIO/时基后，调用新平台的初始化函数。
 3. 调用 `BNO085_Init()`，再启用所需报告。
-4. 循环调用 `BNO085_Poll()`；只在对应 event bit 出现时读取 Getter。
+4. 简单阻塞式任务循环调用 `BNO085_Poll()`；高刷新率任务在
+   H_INTN/DMA 唤醒后调用 `BNO085_PollAsync()` 推进状态机。
 5. 首次上板先用较低 SPI 频率验证，再逐步提高，但不得超过 3 MHz。
 
 驱动当前是无动态内存的单实例实现，不支持在多个任务或中断中同时调用。RTOS 中应
-让一个任务独占 `BNO085_Poll()`，其他任务通过队列或对缓存快照加锁来取数据。
+让一个任务独占 `BNO085_Poll()` 或 `BNO085_PollAsync()`，其他任务通过队列
+或对缓存快照加锁来取数据。
 
 ## 进一步提速
 
-- 将 H_INTN 配成下降沿 EXTI，避免主循环轮询数据就绪。
-- 在平台层增加 SPI DMA 时，要保证一次 SHTP 事务期间 CS 始终保持为低。
+- 将 H_INTN 配成下降沿 EXTI；是否使用 `WFI`、RTOS 信号量或循环调度由上层应用决定。
+- 异步实现必须保证一个 SHTP 物理包的 4 字节头和 cargo 期间 CS 始终为低。
 - 将串口日志改为 DMA/环形缓冲，或者降低日志频率。
 - 只启用业务真正需要的 SH-2 报告，避免无用的总线和解析负载。

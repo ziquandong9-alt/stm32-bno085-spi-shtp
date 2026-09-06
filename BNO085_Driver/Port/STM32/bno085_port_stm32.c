@@ -15,6 +15,8 @@
  * 核心为单实例设计，因此保存一份引脚和 SPI 句柄即可。 */
 static BNO085_STM32_PortConfig_t port_config;
 static bool port_ready;
+/* Written in HAL IRQ callbacks and read in thread/main context. / ISR 写、主循环读。 */
+static volatile BNO085_PortAsyncStatus_t async_status = BNO085_PORT_ASYNC_IDLE;
 
 bool BNO085_STM32_Port_Init(const BNO085_STM32_PortConfig_t *config)
 {
@@ -29,6 +31,7 @@ bool BNO085_STM32_Port_Init(const BNO085_STM32_PortConfig_t *config)
      * 复制结构体，调用者可以安全地使用局部变量传入配置。 */
     port_config = *config;
     port_ready = true;
+    async_status = BNO085_PORT_ASYNC_IDLE;
     BNO085_Port_SetChipSelect(false);
     BNO085_Port_SetWake(false);
     BNO085_Port_SetReset(false);
@@ -51,6 +54,60 @@ bool BNO085_Port_SPITransfer(const uint8_t *tx, uint8_t *rx,
      * BNO085 SPI 为全双工；HAL 参数不是 const，所以这里仅做类型转换。 */
     return (HAL_SPI_TransmitReceive(port_config.spi, (uint8_t *)tx, rx,
                                     length, timeout_ms) == HAL_OK);
+}
+
+bool BNO085_Port_SPITransferAsync(const uint8_t *tx, uint8_t *rx,
+                                 uint16_t length)
+{
+    HAL_StatusTypeDef hal_status;
+
+    if ((!port_ready) || (tx == NULL) || (rx == NULL) || (length == 0U) ||
+        (async_status == BNO085_PORT_ASYNC_BUSY)) {
+        return false;
+    }
+
+    /* Publish BUSY before enabling DMA interrupts so even a very short
+     * transfer cannot complete before the state is visible.
+     * 先发布 BUSY 再开 DMA，避免极短事务完成中断与状态写入竞争。 */
+    async_status = BNO085_PORT_ASYNC_BUSY;
+    /* HAL also declares DMA TxData non-const; DMA only reads this buffer.
+     * HAL 的 DMA TxData 同样未标 const，但 DMA 只会读取该缓冲。 */
+    hal_status = HAL_SPI_TransmitReceive_DMA(port_config.spi, (uint8_t *)tx,
+                                             rx, length);
+    if (hal_status != HAL_OK) {
+        async_status = BNO085_PORT_ASYNC_ERROR;
+        return false;
+    }
+    return true;
+}
+
+BNO085_PortAsyncStatus_t BNO085_Port_SPITransferAsyncStatus(void)
+{
+    return async_status;
+}
+
+void BNO085_Port_SPITransferAsyncAbort(void)
+{
+    if (port_ready && (async_status == BNO085_PORT_ASYNC_BUSY)) {
+        (void)HAL_SPI_DMAStop(port_config.spi);
+    }
+    async_status = BNO085_PORT_ASYNC_IDLE;
+}
+
+/** HAL full-duplex completion hook. / HAL 全双工 DMA 完成回调。 */
+void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
+{
+    if (port_ready && (hspi == port_config.spi)) {
+        async_status = BNO085_PORT_ASYNC_COMPLETE;
+    }
+}
+
+/** HAL SPI/DMA error hook. / HAL SPI 或 DMA 错误回调。 */
+void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
+{
+    if (port_ready && (hspi == port_config.spi)) {
+        async_status = BNO085_PORT_ASYNC_ERROR;
+    }
 }
 
 void BNO085_Port_SetChipSelect(bool asserted)

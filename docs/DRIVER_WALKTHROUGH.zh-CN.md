@@ -396,6 +396,9 @@ API 保存第一条，但 `response_count` 必须达到 4 才返回。这个“�
 
 ```c
 BNO085_EnableAccelerometer(10000U);
+BNO085_EnableGyroscope(10000U);
+BNO085_EnableMagnetometer(40000U);
+BNO085_EnableGameRotationVector(10000U);
 BNO085_EnableRotationVector(10000U);
 ```
 
@@ -403,7 +406,7 @@ BNO085_EnableRotationVector(10000U);
 
 ```c
 command[0] = 0xFDU;       /* Set Feature */
-command[1] = report_id;   /* 0x01 accel，0x05 rotation vector */
+command[1] = report_id;   /* 0x01 accel，0x02 gyro，0x03 mag，0x05 RV，0x08 Game RV */
 command[5] = interval_us & 0xFFU;
 command[6] = interval_us >> 8;
 command[7] = interval_us >> 16;
@@ -417,17 +420,17 @@ command[8] = interval_us >> 24;
 ```
 
 Set Feature 本身是单向控制命令。因此示例随后不是等一个“enable OK”字符串，而是真正调用
-`BNO085_Poll()`，直到同时收到 acceleration 和 rotation-vector event。这是更可靠的功能确认。
+`BNO085_Poll()`，直到已启用的 5 种 report event 都真正到达。这是更可靠的功能确认。
 
 ---
 
-## 第 12 步：`BNO085_Poll()` 是流式阶段唯一 I/O 入口
+## 第 12 步：阻塞 Poll 和 DMA 异步 Poll
 
-主循环只做：
+启动阶段使用阻塞入口，方便按顺序验证首帧：
 
 ```c
 uint32_t events = 0U;
-status = BNO085_Poll(200U, &events);
+status = BNO085_Poll(1000U, &events);
 ```
 
 `BNO085_Poll()` 的内部调用链：
@@ -444,12 +447,34 @@ BNO085_Poll
       -> 设置 event bits
 ```
 
+持续采集阶段改用非阻塞入口：
+
+```c
+status = BNO085_PollAsync(&events);
+if (status == BNO085_PENDING) return; /* DMA 未完成，本轮跳过 */
+```
+
+`BNO085_PollAsync()` 不在函数里等 SPI。它每次只推进一步状态机，
+然后立即把执行权还给上层：
+
+```text
+IDLE --H_INTN为低--> HEADER_DMA --4字节完成--> CARGO_DMA
+  ^                                                    |
+  +------------------ 解析、更新缓存 <-------------+
+```
+
+包头和 cargo 必须分两段 DMA，因为 cargo 长度只能从前 4 字节得知；
+但两段 DMA 之间不能释放 CS，否则 BNO085 会把 cargo 误当成新包。
+
 为什么返回 event bits，而不直接返回某一种数据？因为同一个 SHTP cargo 可能同时包含时间戳、
 加速度和 Rotation Vector。位图允许一次调用告诉应用多个缓存已更新：
 
 ```c
 if (events & BNO085_EVENT_ROTATION_VECTOR) { ... }
 if (events & BNO085_EVENT_ACCELEROMETER)   { ... }
+if (events & BNO085_EVENT_GYROSCOPE)       { ... }
+if (events & BNO085_EVENT_MAGNETOMETER)    { ... }
+if (events & BNO085_EVENT_GAME_ROTATION_VECTOR) { ... }
 ```
 
 ---
@@ -461,7 +486,10 @@ channel 3 cargo 不是“一包只放一个传感器值”。常见布局类似�
 ```text
 FB + 4-byte base timestamp
 01 + accelerometer fields
+02 + gyroscope fields
+03 + magnetometer fields
 05 + rotation-vector fields
+08 + game-rotation-vector fields
 ```
 
 `parse_sensor_payload()` 使用 cursor：
@@ -518,6 +546,22 @@ have_acceleration = true;
 ```
 
 这里的值包含重力。传感器静止时三个轴的矢量模长应接近 `9.81 m/s²`，不应该三个轴都接近 0。
+
+### 第 14A 步：解析陀螺仪、磁力计和 Game Rotation Vector
+
+三轴陀螺仪 `0x02` 与加速度一样是 10 字节，但数据为有符号 Q9，
+因此 `raw / 512` 得到 rad/s。磁力计 `0x03` 也是 10 字节，为 Q4，
+`raw / 16` 得到 uT。
+
+Game Rotation Vector `0x08` 是不使用磁力计的六轴 Q14 四元数。它的报告长度
+为 12 字节，没有 Rotation Vector 末尾的两字节角度误差估计。Game RV
+的 yaw 不受磁干扰瞬间拉偏，但会随陀螺仪零偏慢慢漂移。
+
+```c
+gyro_rps = read_s16_le(p + 4U) * (1.0f / 512.0f);
+mag_uT   = read_s16_le(p + 4U) * (1.0f / 16.0f);
+game_qx  = read_s16_le(p + 4U) * (1.0f / 16384.0f);
+```
 
 ---
 
@@ -597,7 +641,7 @@ BNO085_Status_t BNO085_GetYaw(float *yaw_deg)
 所以正确使用模式是：
 
 ```c
-status = BNO085_Poll(200U, &events);  /* 这里发生 SPI I/O */
+status = BNO085_PollAsync(&events);   /* 这里推进 DMA/SPI I/O */
 if ((status == BNO085_OK) &&
     (events & BNO085_EVENT_ROTATION_VECTOR)) {
     BNO085_GetYaw(&yaw);              /* 以下都不发生 SPI I/O */
@@ -606,20 +650,37 @@ if ((status == BNO085_OK) &&
 }
 ```
 
-不应该只反复调用 Getter 而不调用 `BNO085_Poll()`，否则读到的永远是同一份旧缓存。
+不应该只反复调用 Getter 而不调用 `BNO085_Poll()` 或 `BNO085_PollAsync()`，
+否则读到的永远是同一份旧缓存。
 
 ---
 
 ## 第 18 步：读懂 `main()` 的持续输出和自动恢复
 
-启动成功后，主循环每次最多等待 200 ms：
+启动成功后，事件、打印、统计和恢复都封装到一个私有服务函数：
 
 ```c
-BNO085_Status_t status = BNO085_Poll(200U, &events);
+static void bno085_process(void)
+{
+    uint32_t events = 0U;
+    BNO085_Status_t status = BNO085_PollAsync(&events);
+    /* 处理 event bits、打印、每秒统计和断流恢复 */
+}
 ```
 
-只有本次出现 Rotation Vector event 才打印 YPR。加速度可能单独到达，此时缓存会更新，但不会产生
-一行重复姿态输出。
+因此主循环只保留：
+
+```c
+while (1) {
+    bno085_process();
+    /* 其他应用任务 */
+}
+```
+
+服务函数不执行 `WFI` 也不等待 DMA；是否休眠由整个应用的调度策略决定。
+只有本次出现 Rotation Vector event 才更新 YPR，示例每 4 帧打印一次，
+即传感器保持约 100 Hz 采集，但把阻塞串口日志降为约 25 Hz。其他报告可能
+单独到达，此时它们各自的缓存仍会更新。
 
 每次姿态成功时记录：
 
@@ -648,7 +709,7 @@ if ((uint32_t)(HAL_GetTick() - last_rotation_ms) >= 1000U) {
 | `timeout` during init | H_INTN、WAKE/PS0、PS1、NRST 和启动等待顺序 |
 | `invalid report` | SPI Mode、dummy byte、CS 是否中途释放、包是否排空 |
 | Product ID 正常但无数据 | 是否等待 reset complete、Set Feature 周期和 report ID |
-| `no cached data` | 是否先启用报告并成功调用过 `BNO085_Poll()` |
+| `no cached data` | 是否先启用报告并成功调用过 Poll/PollAsync |
 | YPR 跳变 | 安装坐标、磁干扰、欧拉角万向锁；先查看原始四元数 |
 
 把问题定位到“Port/SPI”“SHTP”“SH-2 配置”“数学/坐标”中的一层，会比同时改所有参数有效得多。
@@ -662,7 +723,8 @@ if ((uint32_t)(HAL_GetTick() - last_rotation_ms) >= 1000U) {
 3. 暂时把 SPI 改回 128 分频，比较功能不变但总线占用增加多少。
 4. 在 `read_packet()` 中打印 header 的四个字节，观察不同 channel 的 sequence 独立变化。
 5. 新建一个假的 PC Port 层，用预先保存的 cargo 喂给解析器，为 Q8/Q14 换算写单元测试。
-6. 最后尝试 H_INTN EXTI + SPI DMA，但必须保持一次 SHTP 事务中 CS 连续为低。
+6. 跟踪 `IDLE -> HEADER_DMA -> CARGO_DMA` 状态，说明为什么两段 DMA 期间 CS 必须连续为低。
+7. 把 UART `printf` 改成 DMA 环形缓冲，比较输出频率提高后的 CPU 占用。
 
 完成前四项，你已经能独立读懂和维护这个驱动；完成第五项，就具备把协议解析从硬件测试中分离出来
-的能力；完成第六项，则可以继续向低延迟、低 CPU 占用版本演进。
+的能力；完成第六项，就能独立维护当前 DMA 快速路径。
