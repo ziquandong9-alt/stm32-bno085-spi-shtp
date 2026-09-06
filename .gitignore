@@ -1,0 +1,32 @@
+# Keil build outputs
+MDK-ARM/BNO085/
+MDK-ARM/*.lst
+MDK-ARM/*.uvguix.*
+MDK-ARM/*.uvoptx
+MDK-ARM/JLinkLog.txt
+MDK-ARM/*.bak
+
+# STM32CubeIDE / generic IDE state
+.settings/
+.metadata/
+.vscode/
+.idea/
+Debug/
+Release/
+
+# Generic compiler and local files
+*.o
+*.d
+*.crf
+*.axf
+*.elf
+*.hex
+*.map
+*.lnp
+*.dep
+*.log
+*.tmp
+*.user
+*.suo
+Thumbs.db
+.DS_Store

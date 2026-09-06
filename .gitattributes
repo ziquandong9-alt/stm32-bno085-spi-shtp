@@ -1,0 +1,4 @@
+# Normalize only CubeMX metadata that otherwise appears as one-line changes
+# on non-Windows systems. Vendor and generated source files stay untouched.
+*.ioc text eol=lf
+.mxproject text eol=lf

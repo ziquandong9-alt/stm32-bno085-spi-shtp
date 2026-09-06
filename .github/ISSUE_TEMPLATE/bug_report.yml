@@ -1,0 +1,55 @@
+name: "Bug report / 故障报告"
+description: "Report a reproducible driver or hardware communication problem / 报告可复现问题"
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: "Please include complete logs and hardware details. 请提供完整日志和硬件信息。"
+  - type: input
+    id: mcu
+    attributes:
+      label: "MCU and board / MCU 与开发板"
+    validations:
+      required: true
+  - type: input
+    id: sensor
+    attributes:
+      label: "BNO085 module and firmware / 模块与固件"
+      description: "Include part number, firmware version, build and reset cause."
+    validations:
+      required: true
+  - type: textarea
+    id: wiring
+    attributes:
+      label: "Wiring and SPI configuration / 接线与 SPI 配置"
+      description: "Include PS0, PS1, BOOTN, CLKSEL, SCK frequency and voltage."
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: "Steps to reproduce / 复现步骤"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: "Complete serial/build log / 完整串口与编译日志"
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: waveform
+    attributes:
+      label: "Logic-analyzer notes / 逻辑分析仪信息"
+      description: "Optional: H_INTN, CS, SCK, MOSI and MISO."
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: "Checklist / 检查"
+      options:
+        - label: "I read the debugging guide. / 我已阅读排错文档。"
+          required: true
+        - label: "SPI clock does not exceed 3 MHz. / SPI 时钟未超过 3 MHz。"
+          required: true

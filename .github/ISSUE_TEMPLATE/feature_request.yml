@@ -1,0 +1,34 @@
+name: "Feature request / 功能建议"
+description: "Suggest a report type, platform port or API improvement / 建议新报告、平台或 API"
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: use_case
+    attributes:
+      label: "Use case / 使用场景"
+      description: "Describe the real application and why the existing API is insufficient."
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: "Proposed behavior / 建议行为"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: "Area / 范围"
+      options:
+        - "Portable core / 可移植核心"
+        - "Platform port / 平台适配"
+        - "SH-2 report / SH-2 报告"
+        - "Documentation / 文档"
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: "Compatibility impact / 兼容性影响"
+      description: "Mention public API, RAM, timing or hardware changes."
