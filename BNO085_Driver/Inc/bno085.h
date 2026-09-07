@@ -31,6 +31,15 @@ extern "C" {
 #define BNO085_EVENT_MAGNETOMETER     (1UL << 3)
 /** A Game Rotation Vector sample is available. / 收到游戏旋转矢量样本。 */
 #define BNO085_EVENT_GAME_ROTATION_VECTOR (1UL << 4)
+#define BNO085_EVENT_LINEAR_ACCELERATION  (1UL << 5)
+#define BNO085_EVENT_GRAVITY              (1UL << 6)
+#define BNO085_EVENT_GYROSCOPE_UNCAL      (1UL << 7)
+#define BNO085_EVENT_MAGNETOMETER_UNCAL   (1UL << 8)
+#define BNO085_EVENT_RAW_ACCELEROMETER    (1UL << 9)
+#define BNO085_EVENT_RAW_GYROSCOPE        (1UL << 10)
+#define BNO085_EVENT_RAW_MAGNETOMETER     (1UL << 11)
+/** A SHTP command-channel error list was received. / 收到 SHTP 错误列表。 */
+#define BNO085_EVENT_DIAGNOSTIC           (1UL << 31)
 
 /** Driver result codes. / 驱动返回状态。 */
 typedef enum {
@@ -65,7 +74,7 @@ typedef struct {
     float accuracy_rad;      /**< Estimated angular error in radians. / 角误差估计。 */
     uint8_t accuracy;        /**< SH-2 status: 0 unreliable ... 3 high. / 精度 0~3。 */
     uint8_t sequence;        /**< Sensor report sequence number. / 传感器报告序号。 */
-    uint32_t timestamp_us;   /**< BNO085 timebase in microseconds. / 传感器微秒时间戳。 */
+    uint32_t timestamp_us;   /**< MCU time corrected to sampling instant. / 修正到采样时刻的 MCU 微秒时间。 */
 } BNO085_RotationVector_t;
 
 /** Z-Y-X Euler angles converted once per sample. / 每帧只换算一次的 Z-Y-X 欧拉角。 */
@@ -107,6 +116,69 @@ typedef struct {
     uint32_t timestamp_us;
 } BNO085_Magnetometer_t;
 
+/** Linear acceleration excludes gravity; gravity contains gravity only.
+ *  线性加速度已去除重力，重力向量则只保留重力分量。 */
+typedef BNO085_Acceleration_t BNO085_LinearAcceleration_t;
+typedef BNO085_Acceleration_t BNO085_Gravity_t;
+
+/** Uncalibrated angular velocity plus estimated drift, Q9 rad/s on wire.
+ *  未校准角速度及估计零偏；线上格式为 Q9 rad/s。 */
+typedef struct {
+    float x_rps, y_rps, z_rps;
+    float bias_x_rps, bias_y_rps, bias_z_rps;
+    uint8_t accuracy, sequence;
+    uint32_t timestamp_us;
+} BNO085_UncalibratedGyroscope_t;
+
+/** Uncalibrated magnetic field plus estimated hard-iron bias, Q4 uT.
+ *  未校准磁场及估计硬铁偏置；线上格式为 Q4 uT。 */
+typedef struct {
+    float x_uT, y_uT, z_uT;
+    float bias_x_uT, bias_y_uT, bias_z_uT;
+    uint8_t accuracy, sequence;
+    uint32_t timestamp_us;
+} BNO085_UncalibratedMagnetometer_t;
+
+/** Raw accelerometer/magnetometer ADC counts and sensor-local sample timer.
+ *  加速度计/磁力计原始 ADC 计数及传感器本地采样计时。 */
+typedef struct {
+    int16_t x_counts, y_counts, z_counts;
+    uint32_t sensor_timestamp_us;
+    uint8_t accuracy, sequence;
+    uint32_t timestamp_us;
+} BNO085_RawVector_t;
+
+/** Raw gyroscope additionally reports a raw temperature ADC count.
+ *  原始陀螺仪还包含温度 ADC 计数。 */
+typedef struct {
+    int16_t x_counts, y_counts, z_counts, temperature_counts;
+    uint32_t sensor_timestamp_us;
+    uint8_t accuracy, sequence;
+    uint32_t timestamp_us;
+} BNO085_RawGyroscope_t;
+
+/** Runtime counters for field diagnosis; counters saturate only at uint32 wrap.
+ *  现场诊断计数；可用于判断丢包、协议错误和总线恢复是否发生。 */
+typedef struct {
+    uint32_t shtp_packets;
+    uint32_t shtp_sequence_gaps;
+    uint32_t sensor_sequence_gaps;
+    uint32_t invalid_packets;
+    uint32_t continuation_packets;
+    uint32_t port_errors;
+    uint32_t dma_timeouts;
+    uint32_t feature_verify_failures;
+    uint32_t shtp_error_reports;
+    uint32_t transport_recoveries;
+    uint32_t hard_resets;
+    uint32_t port_raw_error;
+    uint32_t requested_interval_us;
+    uint32_t effective_interval_us;
+    uint8_t last_shtp_error;
+    uint8_t last_error_channel;
+    uint8_t last_feature_id;
+} BNO085_Diagnostics_t;
+
 /**
  * Initialize and hardware-reset BNO085. / 初始化并硬件复位 BNO085。
  * @pre A platform adapter such as BNO085_STM32_Port_Init() is ready.
@@ -116,6 +188,13 @@ BNO085_Status_t BNO085_Init(void);
 
 /** Repeat the complete reset/handshake sequence. / 重新执行完整复位和握手。 */
 BNO085_Status_t BNO085_Reset(void);
+
+/** Recover SPI/DMA only, preserving SH-2 report configuration. / 仅恢复总线，不复位传感器。 */
+BNO085_Status_t BNO085_RecoverTransport(void);
+
+/** Copy/clear diagnostic counters. / 读取或清零诊断计数。 */
+BNO085_Status_t BNO085_GetDiagnostics(BNO085_Diagnostics_t *diagnostics);
+void BNO085_ClearDiagnostics(void);
 
 /** Request the first SH-2 product-ID entry. / 请求第一条产品与固件信息。 */
 BNO085_Status_t BNO085_GetProductInfo(BNO085_ProductInfo_t *info);
@@ -134,6 +213,41 @@ BNO085_Status_t BNO085_EnableMagnetometer(uint32_t report_interval_us);
 
 /** Enable 6-axis Game Rotation Vector (no magnetometer). / 启用六轴游戏旋转矢量。 */
 BNO085_Status_t BNO085_EnableGameRotationVector(uint32_t report_interval_us);
+BNO085_Status_t BNO085_EnableLinearAcceleration(uint32_t report_interval_us);
+BNO085_Status_t BNO085_EnableGravity(uint32_t report_interval_us);
+BNO085_Status_t BNO085_EnableUncalibratedGyroscope(uint32_t report_interval_us);
+BNO085_Status_t BNO085_EnableUncalibratedMagnetometer(uint32_t report_interval_us);
+BNO085_Status_t BNO085_EnableRawAccelerometer(uint32_t report_interval_us);
+BNO085_Status_t BNO085_EnableRawGyroscope(uint32_t report_interval_us);
+BNO085_Status_t BNO085_EnableRawMagnetometer(uint32_t report_interval_us);
+
+/** Enable selected MotionEngine calibration algorithms (bitwise OR flags).
+ *  启用选定的 MotionEngine 校准算法，各标志可按位或。 */
+#define BNO085_CAL_ACCELEROMETER  (1U << 0)
+#define BNO085_CAL_GYROSCOPE      (1U << 1)
+#define BNO085_CAL_MAGNETOMETER   (1U << 2)
+#define BNO085_CAL_PLANAR         (1U << 3)
+#define BNO085_CAL_ON_TABLE       (1U << 4)
+BNO085_Status_t BNO085_SetCalibration(uint8_t calibration_flags);
+/** Save current Dynamic Calibration Data to BNO085 flash. / 保存当前动态校准。 */
+BNO085_Status_t BNO085_SaveCalibration(void);
+
+/** Tare axes and rotation-vector bases. / Tare 轴掩码与参考旋转矢量。 */
+#define BNO085_TARE_X  (1U << 0)
+#define BNO085_TARE_Y  (1U << 1)
+#define BNO085_TARE_Z  (1U << 2)
+typedef enum {
+    BNO085_TARE_BASIS_ROTATION_VECTOR = 0,
+    BNO085_TARE_BASIS_GAME_ROTATION_VECTOR = 1,
+    BNO085_TARE_BASIS_GEOMAGNETIC_ROTATION_VECTOR = 2
+} BNO085_TareBasis_t;
+/** Apply a runtime tare; use XYZ or Z for firmware-portable behavior.
+ *  执行运行时归零；为兼容固件，建议使用 XYZ 全轴或仅 Z 轴。 */
+BNO085_Status_t BNO085_TareNow(uint8_t axes, BNO085_TareBasis_t basis);
+/** Persist the last eligible tare to flash. / 把最近一次可持久化 Tare 写入闪存。 */
+BNO085_Status_t BNO085_PersistTare(void);
+/** Clear the current runtime tare without erasing DCD. / 清除当前运行时 Tare。 */
+BNO085_Status_t BNO085_ClearTare(void);
 
 /**
  * Wait for one useful sensor cargo, decode it and update the cache.
@@ -200,6 +314,13 @@ BNO085_Status_t BNO085_GetMagnetometerZ(float *z_uT);
 /** Game Rotation Vector and its cached Euler angles. / 游戏旋转矢量及其欧拉角。 */
 BNO085_Status_t BNO085_GetGameRotationVector(BNO085_RotationVector_t *value);
 BNO085_Status_t BNO085_GetGameEuler(BNO085_Euler_t *value);
+BNO085_Status_t BNO085_GetLinearAcceleration(BNO085_LinearAcceleration_t *value);
+BNO085_Status_t BNO085_GetGravity(BNO085_Gravity_t *value);
+BNO085_Status_t BNO085_GetUncalibratedGyroscope(BNO085_UncalibratedGyroscope_t *value);
+BNO085_Status_t BNO085_GetUncalibratedMagnetometer(BNO085_UncalibratedMagnetometer_t *value);
+BNO085_Status_t BNO085_GetRawAccelerometer(BNO085_RawVector_t *value);
+BNO085_Status_t BNO085_GetRawGyroscope(BNO085_RawGyroscope_t *value);
+BNO085_Status_t BNO085_GetRawMagnetometer(BNO085_RawVector_t *value);
 
 /** Human-readable status text for diagnostics. / 将状态码转换为调试字符串。 */
 const char *BNO085_StatusString(BNO085_Status_t status);

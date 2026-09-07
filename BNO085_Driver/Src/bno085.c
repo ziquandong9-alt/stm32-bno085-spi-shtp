@@ -42,17 +42,29 @@
 #define REPORT_ACCELEROMETER           0x01U
 #define REPORT_GYROSCOPE               0x02U
 #define REPORT_MAGNETOMETER            0x03U
+#define REPORT_LINEAR_ACCELERATION     0x04U
 #define REPORT_ROTATION_VECTOR         0x05U
+#define REPORT_GRAVITY                 0x06U
+#define REPORT_GYROSCOPE_UNCAL         0x07U
 #define REPORT_GAME_ROTATION_VECTOR    0x08U
+#define REPORT_MAGNETOMETER_UNCAL      0x0FU
+#define REPORT_RAW_ACCELEROMETER       0x14U
+#define REPORT_RAW_GYROSCOPE           0x15U
+#define REPORT_RAW_MAGNETOMETER        0x16U
 #define REPORT_PRODUCT_ID_RESPONSE     0xF8U
 #define REPORT_PRODUCT_ID_REQUEST      0xF9U
 #define REPORT_SET_FEATURE             0xFDU
+#define REPORT_GET_FEATURE_REQUEST     0xFEU
 #define REPORT_GET_FEATURE_RESPONSE    0xFCU
 #define REPORT_COMMAND_RESPONSE        0xF1U
 #define REPORT_FRS_READ_RESPONSE       0xF3U
 #define REPORT_FRS_WRITE_RESPONSE      0xF5U
 #define REPORT_BASE_TIMESTAMP          0xFBU
 #define REPORT_TIMESTAMP_REBASE        0xFAU
+#define REPORT_COMMAND_REQUEST         0xF2U
+#define COMMAND_SAVE_DCD               0x06U
+#define COMMAND_ME_CALIBRATION         0x07U
+#define COMMAND_TARE                   0x03U
 
 /* Fixed-point conversion factors from the SH-2 report definitions.
  * SH-2 报告规定的定点数缩放系数。 */
@@ -72,6 +84,11 @@
  * 解析完整报告后才更新快照，因此三个角度不会来自不同传感器帧。
  */
 static uint8_t tx_sequence[SHTP_CHANNEL_COUNT];
+static uint8_t rx_sequence[SHTP_CHANNEL_COUNT];
+static bool rx_sequence_valid[SHTP_CHANNEL_COUNT];
+static uint8_t sensor_sequence[256];
+static bool sensor_sequence_valid[256];
+static uint8_t command_sequence;
 static uint8_t io_tx[IO_BUFFER_SIZE];
 static uint8_t io_rx[IO_BUFFER_SIZE];
 static uint8_t cargo_buffer[CARGO_BUFFER_SIZE];
@@ -83,6 +100,13 @@ static bool have_gyroscope;
 static bool have_magnetometer;
 static bool have_game_rotation_vector;
 static bool have_game_euler;
+static bool have_linear_acceleration;
+static bool have_gravity;
+static bool have_uncalibrated_gyroscope;
+static bool have_uncalibrated_magnetometer;
+static bool have_raw_accelerometer;
+static bool have_raw_gyroscope;
+static bool have_raw_magnetometer;
 static BNO085_RotationVector_t latest_rotation_vector;
 static BNO085_Euler_t latest_euler;
 static BNO085_Acceleration_t latest_acceleration;
@@ -90,6 +114,14 @@ static BNO085_Gyroscope_t latest_gyroscope;
 static BNO085_Magnetometer_t latest_magnetometer;
 static BNO085_RotationVector_t latest_game_rotation_vector;
 static BNO085_Euler_t latest_game_euler;
+static BNO085_LinearAcceleration_t latest_linear_acceleration;
+static BNO085_Gravity_t latest_gravity;
+static BNO085_UncalibratedGyroscope_t latest_uncalibrated_gyroscope;
+static BNO085_UncalibratedMagnetometer_t latest_uncalibrated_magnetometer;
+static BNO085_RawVector_t latest_raw_accelerometer;
+static BNO085_RawGyroscope_t latest_raw_gyroscope;
+static BNO085_RawVector_t latest_raw_magnetometer;
+static BNO085_Diagnostics_t diagnostics;
 
 /* Non-blocking receive state.  CS remains asserted from the header DMA until
  * the last cargo DMA completes. / 非阻塞收包状态；包头到载荷结束期间 CS 保持低。 */
@@ -109,6 +141,48 @@ static uint8_t async_channel;
 static bool async_continuation;
 static bool async_chunk_is_cargo;
 static uint32_t async_transfer_start_ms;
+static uint32_t async_packet_timestamp_us;
+
+static void async_rx_stop(void);
+
+/** Record one physical packet and detect channel-local sequence gaps.
+ *  记录物理包，并按通道检测 SHTP 序号跳变。 */
+static void record_shtp_header(uint8_t channel, uint8_t sequence,
+                               bool continuation)
+{
+    if (rx_sequence_valid[channel] &&
+        (sequence != (uint8_t)(rx_sequence[channel] + 1U))) {
+        diagnostics.shtp_sequence_gaps++;
+    }
+    rx_sequence[channel] = sequence;
+    rx_sequence_valid[channel] = true;
+    diagnostics.shtp_packets++;
+    if (continuation) {
+        diagnostics.continuation_packets++;
+    }
+}
+
+/** Snapshot the platform's vendor-specific error for application logging.
+ *  保存平台层最近一次底层错误，供应用诊断。 */
+static void record_port_error(void)
+{
+    uint32_t raw_error = 0U;
+    (void)BNO085_Port_GetLastError(&raw_error);
+    diagnostics.port_errors++;
+    diagnostics.port_raw_error = raw_error;
+}
+
+/** Detect missing SH-2 sensor reports independently from SHTP packets.
+ *  独立于 SHTP 包序号，检测每种传感器报告的丢帧。 */
+static void record_sensor_sequence(uint8_t report_id, uint8_t sequence)
+{
+    if (sensor_sequence_valid[report_id] &&
+        (sequence != (uint8_t)(sensor_sequence[report_id] + 1U))) {
+        diagnostics.sensor_sequence_gaps++;
+    }
+    sensor_sequence[report_id] = sequence;
+    sensor_sequence_valid[report_id] = true;
+}
 
 /** Decode little-endian unsigned 16-bit data. / 读取小端无符号 16 位数。 */
 static uint16_t read_u16_le(const uint8_t *p)
@@ -127,6 +201,12 @@ static uint32_t read_u32_le(const uint8_t *p)
 {
     return ((uint32_t)p[0]) | ((uint32_t)p[1] << 8) |
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/** Decode little-endian signed 32-bit data. / 读取小端有符号 32 位数。 */
+static int32_t read_s32_le(const uint8_t *p)
+{
+    return (int32_t)read_u32_le(p);
 }
 
 /** Overflow-safe timeout test based on unsigned subtraction. / 可处理时基回卷的超时判断。 */
@@ -199,6 +279,7 @@ static BNO085_Status_t spi_read_bytes(uint8_t *data, uint16_t length)
         memset(io_tx, 0, count);
         if (!BNO085_Port_SPITransfer(io_tx, destination, count,
                                      SPI_TIMEOUT_MS)) {
+            record_port_error();
             return BNO085_ERR_PORT;
         }
         offset = (uint16_t)(offset + count);
@@ -227,6 +308,7 @@ static BNO085_Status_t spi_write_packet(const uint8_t *header,
     }
     if (!BNO085_Port_SPITransfer(io_tx, io_rx, packet_length,
                                  SPI_TIMEOUT_MS)) {
+        record_port_error();
         return BNO085_ERR_PORT;
     }
     return BNO085_OK;
@@ -272,12 +354,14 @@ static BNO085_Status_t read_packet(uint8_t *buffer, uint16_t capacity,
     if ((packet_length < SHTP_HEADER_SIZE) || (raw_length == 0xFFFFU) ||
         (header[2] >= SHTP_CHANNEL_COUNT)) {
         BNO085_Port_SetChipSelect(false);
+        diagnostics.invalid_packets++;
         return BNO085_ERR_INVALID_REPORT;
     }
 
     *cargo_length = (uint16_t)(packet_length - SHTP_HEADER_SIZE);
     *channel = header[2];
     *continuation = ((header[1] & 0x80U) != 0U);
+    record_shtp_header(*channel, header[3], *continuation);
     copy_length = (*cargo_length > capacity) ? capacity : *cargo_length;
 
     if (copy_length > 0U) {
@@ -518,6 +602,9 @@ static BNO085_Status_t set_report_interval(uint8_t report_id,
                                             uint32_t interval_us)
 {
     uint8_t command[17];
+    uint8_t request[2] = { REPORT_GET_FEATURE_REQUEST, report_id };
+    uint8_t attempt;
+    BNO085_Status_t last_status = BNO085_ERR_COMMAND_FAILED;
 
     if (interval_us == 0U) {
         return BNO085_ERR_BAD_PARAM;
@@ -534,7 +621,126 @@ static BNO085_Status_t set_report_interval(uint8_t report_id,
     command[6] = (uint8_t)((interval_us >> 8) & 0xFFU);
     command[7] = (uint8_t)((interval_us >> 16) & 0xFFU);
     command[8] = (uint8_t)((interval_us >> 24) & 0xFFU);
-    return send_packet(command, sizeof(command), CHANNEL_CONTROL);
+    /* Set Feature has no standalone ACK in SH-2. Verify it by issuing Get
+     * Feature and matching the returned feature ID and effective interval.
+     * SH-2 没有 Set Feature ACK；必须用 Get Feature 读回实际配置。 */
+    for (attempt = 0U; attempt < 2U; attempt++) {
+        BNO085_Status_t status;
+        uint32_t start_ms;
+
+        status = send_packet(command, sizeof(command), CHANNEL_CONTROL);
+        if (status != BNO085_OK) {
+            last_status = status;
+            continue;
+        }
+        status = send_packet(request, sizeof(request), CHANNEL_CONTROL);
+        if (status != BNO085_OK) {
+            last_status = status;
+            continue;
+        }
+
+        start_ms = BNO085_Port_GetTimeMs();
+        while (!timed_out(start_ms, COMMAND_TIMEOUT_MS)) {
+            uint16_t length = sizeof(cargo_buffer);
+            uint16_t cursor = 0U;
+            uint32_t remaining = remaining_time(start_ms, COMMAND_TIMEOUT_MS);
+
+            status = receive_channel(cargo_buffer, &length, CHANNEL_CONTROL,
+                                     remaining);
+            if (status != BNO085_OK) {
+                last_status = status;
+                break;
+            }
+            while (cursor < length) {
+                uint8_t item_length = report_length(cargo_buffer[cursor]);
+                const uint8_t *p = cargo_buffer + cursor;
+
+                if ((item_length == 0U) ||
+                    ((uint16_t)(cursor + item_length) > length)) {
+                    diagnostics.invalid_packets++;
+                    status = BNO085_ERR_INVALID_REPORT;
+                    break;
+                }
+                if ((p[0] == REPORT_GET_FEATURE_RESPONSE) &&
+                    (p[1] == report_id)) {
+                    uint32_t effective_interval = read_u32_le(p + 5U);
+                    diagnostics.last_feature_id = report_id;
+                    diagnostics.requested_interval_us = interval_us;
+                    diagnostics.effective_interval_us = effective_interval;
+                    /* SH-2 may quantize the request to an algorithm-supported
+                     * period (this BNO085 firmware maps 10 ms to 8 ms for the
+                     * accelerometer). Accept a nonzero result within +/-50%;
+                     * a disabled or wildly different feature still fails.
+                     * SH-2 可把周期量化到算法支持值；允许 50% 范围内的合法取整。 */
+                    if ((effective_interval >= (interval_us / 2U)) &&
+                        (effective_interval <=
+                         (interval_us + (interval_us / 2U)))) {
+                        return BNO085_OK;
+                    }
+                    status = BNO085_ERR_COMMAND_FAILED;
+                    last_status = status;
+                    break;
+                }
+                cursor = (uint16_t)(cursor + item_length);
+            }
+        }
+    }
+    diagnostics.feature_verify_failures++;
+    return last_status;
+}
+
+/** Send an SH-2 command and match its response by command and sequence.
+ *  发送 SH-2 命令，并同时按命令号和原请求序号匹配响应。 */
+static BNO085_Status_t send_command_and_wait(uint8_t command_id,
+                                              const uint8_t parameters[9])
+{
+    uint8_t request[12];
+    uint8_t request_sequence = command_sequence++;
+    uint32_t start_ms;
+    BNO085_Status_t status;
+
+    async_rx_stop();
+    memset(request, 0, sizeof(request));
+    request[0] = REPORT_COMMAND_REQUEST;
+    request[1] = request_sequence;
+    request[2] = command_id;
+    if (parameters != NULL) {
+        memcpy(request + 3U, parameters, 9U);
+    }
+    status = send_packet(request, sizeof(request), CHANNEL_CONTROL);
+    if (status != BNO085_OK) {
+        return status;
+    }
+
+    start_ms = BNO085_Port_GetTimeMs();
+    while (!timed_out(start_ms, 500U)) {
+        uint16_t length = sizeof(cargo_buffer);
+        uint16_t cursor = 0U;
+
+        status = receive_channel(cargo_buffer, &length, CHANNEL_CONTROL,
+                                 remaining_time(start_ms, 500U));
+        if (status != BNO085_OK) {
+            return status;
+        }
+        while (cursor < length) {
+            uint8_t item_length = report_length(cargo_buffer[cursor]);
+            const uint8_t *p = cargo_buffer + cursor;
+
+            if ((item_length == 0U) ||
+                ((uint16_t)(cursor + item_length) > length)) {
+                diagnostics.invalid_packets++;
+                return BNO085_ERR_INVALID_REPORT;
+            }
+            if ((p[0] == REPORT_COMMAND_RESPONSE) &&
+                ((p[2] & 0x7FU) == command_id) &&
+                (p[3] == request_sequence)) {
+                return (p[5] == 0U) ? BNO085_OK :
+                                      BNO085_ERR_COMMAND_FAILED;
+            }
+            cursor = (uint16_t)(cursor + item_length);
+        }
+    }
+    return BNO085_ERR_TIMEOUT;
 }
 
 /**
@@ -574,23 +780,30 @@ static void quaternion_to_euler(const BNO085_RotationVector_t *q,
  */
 static BNO085_Status_t parse_sensor_payload(const uint8_t *payload,
                                              uint16_t length,
+                                             uint32_t packet_timestamp_us,
                                              uint32_t *events)
 {
     uint16_t cursor = 0U;
-    uint32_t timestamp_us = BNO085_Port_GetTimeMs() * 1000U;
+    int32_t reference_delta_ticks = 0;
 
     while (cursor < length) {
         uint8_t item_length = report_length(payload[cursor]);
         const uint8_t *p = payload + cursor;
+        uint32_t timestamp_us = packet_timestamp_us;
 
         if ((item_length == 0U) ||
             ((uint16_t)(cursor + item_length) > length)) {
             return BNO085_ERR_INVALID_REPORT;
         }
         if (p[0] == REPORT_BASE_TIMESTAMP) {
-            /* Subsequent reports in this cargo share this sensor timebase.
-             * 后续子报告共享该传感器时间基准。 */
-            timestamp_us = read_u32_le(p + 1U);
+            /* Signed delta is measured backwards from the host interrupt.
+             * 有符号基准差以 H_INTN 时刻为参考，单位 100 us。 */
+            int32_t delta = read_s32_le(p + 1U);
+            if (delta != INT32_MAX) {
+                reference_delta_ticks = -delta;
+            }
+        } else if (p[0] == REPORT_TIMESTAMP_REBASE) {
+            reference_delta_ticks += read_s32_le(p + 1U);
         } else if (p[0] == REPORT_ACCELEROMETER) {
             /* Common sensor header: [0]ID [1]seq [2]status [3]delay;
              * vector data begins at byte 4. / 前四字节为通用传感器头。 */
@@ -633,6 +846,89 @@ static BNO085_Status_t parse_sensor_payload(const uint8_t *payload,
             latest_magnetometer.timestamp_us = timestamp_us;
             have_magnetometer = true;
             *events |= BNO085_EVENT_MAGNETOMETER;
+        } else if (p[0] == REPORT_LINEAR_ACCELERATION) {
+            latest_linear_acceleration.x_mps2 =
+                (float)read_s16_le(p + 4U) * Q8_SCALE;
+            latest_linear_acceleration.y_mps2 =
+                (float)read_s16_le(p + 6U) * Q8_SCALE;
+            latest_linear_acceleration.z_mps2 =
+                (float)read_s16_le(p + 8U) * Q8_SCALE;
+            latest_linear_acceleration.sequence = p[1];
+            latest_linear_acceleration.accuracy = (uint8_t)(p[2] & 0x03U);
+            have_linear_acceleration = true;
+            *events |= BNO085_EVENT_LINEAR_ACCELERATION;
+        } else if (p[0] == REPORT_GRAVITY) {
+            latest_gravity.x_mps2 = (float)read_s16_le(p + 4U) * Q8_SCALE;
+            latest_gravity.y_mps2 = (float)read_s16_le(p + 6U) * Q8_SCALE;
+            latest_gravity.z_mps2 = (float)read_s16_le(p + 8U) * Q8_SCALE;
+            latest_gravity.sequence = p[1];
+            latest_gravity.accuracy = (uint8_t)(p[2] & 0x03U);
+            have_gravity = true;
+            *events |= BNO085_EVENT_GRAVITY;
+        } else if (p[0] == REPORT_GYROSCOPE_UNCAL) {
+            latest_uncalibrated_gyroscope.x_rps =
+                (float)read_s16_le(p + 4U) * Q9_SCALE;
+            latest_uncalibrated_gyroscope.y_rps =
+                (float)read_s16_le(p + 6U) * Q9_SCALE;
+            latest_uncalibrated_gyroscope.z_rps =
+                (float)read_s16_le(p + 8U) * Q9_SCALE;
+            latest_uncalibrated_gyroscope.bias_x_rps =
+                (float)read_s16_le(p + 10U) * Q9_SCALE;
+            latest_uncalibrated_gyroscope.bias_y_rps =
+                (float)read_s16_le(p + 12U) * Q9_SCALE;
+            latest_uncalibrated_gyroscope.bias_z_rps =
+                (float)read_s16_le(p + 14U) * Q9_SCALE;
+            latest_uncalibrated_gyroscope.sequence = p[1];
+            latest_uncalibrated_gyroscope.accuracy =
+                (uint8_t)(p[2] & 0x03U);
+            have_uncalibrated_gyroscope = true;
+            *events |= BNO085_EVENT_GYROSCOPE_UNCAL;
+        } else if (p[0] == REPORT_MAGNETOMETER_UNCAL) {
+            latest_uncalibrated_magnetometer.x_uT =
+                (float)read_s16_le(p + 4U) * Q4_SCALE;
+            latest_uncalibrated_magnetometer.y_uT =
+                (float)read_s16_le(p + 6U) * Q4_SCALE;
+            latest_uncalibrated_magnetometer.z_uT =
+                (float)read_s16_le(p + 8U) * Q4_SCALE;
+            latest_uncalibrated_magnetometer.bias_x_uT =
+                (float)read_s16_le(p + 10U) * Q4_SCALE;
+            latest_uncalibrated_magnetometer.bias_y_uT =
+                (float)read_s16_le(p + 12U) * Q4_SCALE;
+            latest_uncalibrated_magnetometer.bias_z_uT =
+                (float)read_s16_le(p + 14U) * Q4_SCALE;
+            latest_uncalibrated_magnetometer.sequence = p[1];
+            latest_uncalibrated_magnetometer.accuracy =
+                (uint8_t)(p[2] & 0x03U);
+            have_uncalibrated_magnetometer = true;
+            *events |= BNO085_EVENT_MAGNETOMETER_UNCAL;
+        } else if (p[0] == REPORT_RAW_ACCELEROMETER) {
+            latest_raw_accelerometer.x_counts = read_s16_le(p + 4U);
+            latest_raw_accelerometer.y_counts = read_s16_le(p + 6U);
+            latest_raw_accelerometer.z_counts = read_s16_le(p + 8U);
+            latest_raw_accelerometer.sensor_timestamp_us = read_u32_le(p + 12U);
+            latest_raw_accelerometer.sequence = p[1];
+            latest_raw_accelerometer.accuracy = (uint8_t)(p[2] & 0x03U);
+            have_raw_accelerometer = true;
+            *events |= BNO085_EVENT_RAW_ACCELEROMETER;
+        } else if (p[0] == REPORT_RAW_GYROSCOPE) {
+            latest_raw_gyroscope.x_counts = read_s16_le(p + 4U);
+            latest_raw_gyroscope.y_counts = read_s16_le(p + 6U);
+            latest_raw_gyroscope.z_counts = read_s16_le(p + 8U);
+            latest_raw_gyroscope.temperature_counts = read_s16_le(p + 10U);
+            latest_raw_gyroscope.sensor_timestamp_us = read_u32_le(p + 12U);
+            latest_raw_gyroscope.sequence = p[1];
+            latest_raw_gyroscope.accuracy = (uint8_t)(p[2] & 0x03U);
+            have_raw_gyroscope = true;
+            *events |= BNO085_EVENT_RAW_GYROSCOPE;
+        } else if (p[0] == REPORT_RAW_MAGNETOMETER) {
+            latest_raw_magnetometer.x_counts = read_s16_le(p + 4U);
+            latest_raw_magnetometer.y_counts = read_s16_le(p + 6U);
+            latest_raw_magnetometer.z_counts = read_s16_le(p + 8U);
+            latest_raw_magnetometer.sensor_timestamp_us = read_u32_le(p + 12U);
+            latest_raw_magnetometer.sequence = p[1];
+            latest_raw_magnetometer.accuracy = (uint8_t)(p[2] & 0x03U);
+            have_raw_magnetometer = true;
+            *events |= BNO085_EVENT_RAW_MAGNETOMETER;
         } else if (p[0] == REPORT_ROTATION_VECTOR) {
             /* SH-2 order is i, j, k, real = x, y, z, w.
              * SH-2 顺序为 i、j、k、real，即 x、y、z、w。 */
@@ -675,6 +971,48 @@ static BNO085_Status_t parse_sensor_payload(const uint8_t *payload,
             have_game_euler = true;
             *events |= BNO085_EVENT_GAME_ROTATION_VECTOR;
         }
+        if ((p[0] != REPORT_BASE_TIMESTAMP) &&
+            (p[0] != REPORT_TIMESTAMP_REBASE)) {
+            int32_t delay_ticks =
+                (int32_t)(((uint16_t)(p[2] & 0xFCU) << 6) | p[3]);
+            int64_t adjusted = (int64_t)packet_timestamp_us +
+                ((int64_t)reference_delta_ticks + delay_ticks) * 100LL;
+            timestamp_us = (uint32_t)adjusted;
+            record_sensor_sequence(p[0], p[1]);
+
+            /* Timestamp is assigned after decoding so every supported report
+             * below receives the same corrected sampling time. / 在完整解析
+             * 后统一写入修正采样时刻，避免把接收完成时刻误当采样时刻。 */
+            switch (p[0]) {
+                case REPORT_ACCELEROMETER:
+                    latest_acceleration.timestamp_us = timestamp_us; break;
+                case REPORT_GYROSCOPE:
+                    latest_gyroscope.timestamp_us = timestamp_us; break;
+                case REPORT_MAGNETOMETER:
+                    latest_magnetometer.timestamp_us = timestamp_us; break;
+                case REPORT_ROTATION_VECTOR:
+                    latest_rotation_vector.timestamp_us = timestamp_us;
+                    latest_euler.timestamp_us = timestamp_us; break;
+                case REPORT_GAME_ROTATION_VECTOR:
+                    latest_game_rotation_vector.timestamp_us = timestamp_us;
+                    latest_game_euler.timestamp_us = timestamp_us; break;
+                case REPORT_LINEAR_ACCELERATION:
+                    latest_linear_acceleration.timestamp_us = timestamp_us; break;
+                case REPORT_GRAVITY:
+                    latest_gravity.timestamp_us = timestamp_us; break;
+                case REPORT_GYROSCOPE_UNCAL:
+                    latest_uncalibrated_gyroscope.timestamp_us = timestamp_us; break;
+                case REPORT_MAGNETOMETER_UNCAL:
+                    latest_uncalibrated_magnetometer.timestamp_us = timestamp_us; break;
+                case REPORT_RAW_ACCELEROMETER:
+                    latest_raw_accelerometer.timestamp_us = timestamp_us; break;
+                case REPORT_RAW_GYROSCOPE:
+                    latest_raw_gyroscope.timestamp_us = timestamp_us; break;
+                case REPORT_RAW_MAGNETOMETER:
+                    latest_raw_magnetometer.timestamp_us = timestamp_us; break;
+                default: break;
+            }
+        }
         cursor = (uint16_t)(cursor + item_length);
     }
     return BNO085_OK;
@@ -705,6 +1043,7 @@ static BNO085_Status_t async_rx_start(uint8_t *destination,
     async_chunk_is_cargo = destination_is_cargo;
     async_transfer_start_ms = BNO085_Port_GetTimeMs();
     if (!BNO085_Port_SPITransferAsync(io_tx, destination, length)) {
+        record_port_error();
         return BNO085_ERR_PORT;
     }
     return BNO085_PENDING;
@@ -763,7 +1102,19 @@ BNO085_Status_t BNO085_Reset(void)
     have_magnetometer = false;
     have_game_rotation_vector = false;
     have_game_euler = false;
+    have_linear_acceleration = false;
+    have_gravity = false;
+    have_uncalibrated_gyroscope = false;
+    have_uncalibrated_magnetometer = false;
+    have_raw_accelerometer = false;
+    have_raw_gyroscope = false;
+    have_raw_magnetometer = false;
     memset(tx_sequence, 0, sizeof(tx_sequence));
+    memset(rx_sequence, 0, sizeof(rx_sequence));
+    memset(rx_sequence_valid, 0, sizeof(rx_sequence_valid));
+    memset(sensor_sequence_valid, 0, sizeof(sensor_sequence_valid));
+    command_sequence = 0U;
+    diagnostics.hard_resets++;
     memset(&latest_rotation_vector, 0, sizeof(latest_rotation_vector));
     memset(&latest_euler, 0, sizeof(latest_euler));
     memset(&latest_acceleration, 0, sizeof(latest_acceleration));
@@ -772,6 +1123,15 @@ BNO085_Status_t BNO085_Reset(void)
     memset(&latest_game_rotation_vector, 0,
            sizeof(latest_game_rotation_vector));
     memset(&latest_game_euler, 0, sizeof(latest_game_euler));
+    memset(&latest_linear_acceleration, 0, sizeof(latest_linear_acceleration));
+    memset(&latest_gravity, 0, sizeof(latest_gravity));
+    memset(&latest_uncalibrated_gyroscope, 0,
+           sizeof(latest_uncalibrated_gyroscope));
+    memset(&latest_uncalibrated_magnetometer, 0,
+           sizeof(latest_uncalibrated_magnetometer));
+    memset(&latest_raw_accelerometer, 0, sizeof(latest_raw_accelerometer));
+    memset(&latest_raw_gyroscope, 0, sizeof(latest_raw_gyroscope));
+    memset(&latest_raw_magnetometer, 0, sizeof(latest_raw_magnetometer));
 
     /* PS0 doubles as WAKE after boot.  It must be high while reset is sampled
      * to select SPI together with PS1=high. / 复位采样期间 PS0 必须为高。 */
@@ -786,6 +1146,39 @@ BNO085_Status_t BNO085_Reset(void)
         initialized = true;
     }
     return status;
+}
+
+BNO085_Status_t BNO085_RecoverTransport(void)
+{
+    if (!BNO085_Port_IsReady()) {
+        return BNO085_ERR_PORT;
+    }
+    async_rx_stop();
+    BNO085_Port_SetWake(false);
+    BNO085_Port_SetChipSelect(false);
+    if (!BNO085_Port_Recover()) {
+        record_port_error();
+        return BNO085_ERR_PORT;
+    }
+    /* A transfer may have been discarded; accept the next sequence as a new
+     * baseline instead of reporting a misleading gap. / 丢弃中的包不计假丢包。 */
+    memset(rx_sequence_valid, 0, sizeof(rx_sequence_valid));
+    diagnostics.transport_recoveries++;
+    return BNO085_OK;
+}
+
+BNO085_Status_t BNO085_GetDiagnostics(BNO085_Diagnostics_t *value)
+{
+    if (value == NULL) {
+        return BNO085_ERR_BAD_PARAM;
+    }
+    *value = diagnostics;
+    return BNO085_OK;
+}
+
+void BNO085_ClearDiagnostics(void)
+{
+    memset(&diagnostics, 0, sizeof(diagnostics));
 }
 
 bool BNO085_DataReady(void)
@@ -881,6 +1274,93 @@ BNO085_Status_t BNO085_EnableGameRotationVector(uint32_t report_interval_us)
                                report_interval_us);
 }
 
+BNO085_Status_t BNO085_EnableLinearAcceleration(uint32_t report_interval_us)
+{
+    return set_report_interval(REPORT_LINEAR_ACCELERATION,
+                               report_interval_us);
+}
+
+BNO085_Status_t BNO085_EnableGravity(uint32_t report_interval_us)
+{
+    return set_report_interval(REPORT_GRAVITY, report_interval_us);
+}
+
+BNO085_Status_t BNO085_EnableUncalibratedGyroscope(uint32_t report_interval_us)
+{
+    return set_report_interval(REPORT_GYROSCOPE_UNCAL, report_interval_us);
+}
+
+BNO085_Status_t BNO085_EnableUncalibratedMagnetometer(uint32_t report_interval_us)
+{
+    return set_report_interval(REPORT_MAGNETOMETER_UNCAL, report_interval_us);
+}
+
+BNO085_Status_t BNO085_EnableRawAccelerometer(uint32_t report_interval_us)
+{
+    return set_report_interval(REPORT_RAW_ACCELEROMETER, report_interval_us);
+}
+
+BNO085_Status_t BNO085_EnableRawGyroscope(uint32_t report_interval_us)
+{
+    return set_report_interval(REPORT_RAW_GYROSCOPE, report_interval_us);
+}
+
+BNO085_Status_t BNO085_EnableRawMagnetometer(uint32_t report_interval_us)
+{
+    return set_report_interval(REPORT_RAW_MAGNETOMETER, report_interval_us);
+}
+
+BNO085_Status_t BNO085_SetCalibration(uint8_t calibration_flags)
+{
+    uint8_t parameters[9] = {0};
+
+    if ((calibration_flags & 0xE0U) != 0U) {
+        return BNO085_ERR_BAD_PARAM;
+    }
+    parameters[0] = (calibration_flags & BNO085_CAL_ACCELEROMETER) ? 1U : 0U;
+    parameters[1] = (calibration_flags & BNO085_CAL_GYROSCOPE) ? 1U : 0U;
+    parameters[2] = (calibration_flags & BNO085_CAL_MAGNETOMETER) ? 1U : 0U;
+    parameters[3] = 0U; /* Configure subcommand. / 配置子命令。 */
+    parameters[4] = (calibration_flags & BNO085_CAL_PLANAR) ? 1U : 0U;
+    parameters[5] = (calibration_flags & BNO085_CAL_ON_TABLE) ? 1U : 0U;
+    return send_command_and_wait(COMMAND_ME_CALIBRATION, parameters);
+}
+
+BNO085_Status_t BNO085_SaveCalibration(void)
+{
+    return send_command_and_wait(COMMAND_SAVE_DCD, NULL);
+}
+
+BNO085_Status_t BNO085_TareNow(uint8_t axes, BNO085_TareBasis_t basis)
+{
+    uint8_t parameters[9] = {0};
+
+    if ((axes == 0U) || ((axes & 0xF8U) != 0U) ||
+        (basis > BNO085_TARE_BASIS_GEOMAGNETIC_ROTATION_VECTOR)) {
+        return BNO085_ERR_BAD_PARAM;
+    }
+    parameters[0] = 0U; /* Tare Now subcommand. / 立即 Tare 子命令。 */
+    parameters[1] = axes;
+    parameters[2] = (uint8_t)basis;
+    return send_command_and_wait(COMMAND_TARE, parameters);
+}
+
+BNO085_Status_t BNO085_PersistTare(void)
+{
+    uint8_t parameters[9] = {0};
+    parameters[0] = 1U;
+    return send_command_and_wait(COMMAND_TARE, parameters);
+}
+
+BNO085_Status_t BNO085_ClearTare(void)
+{
+    uint8_t parameters[9] = {0};
+    /* Set Reorientation with an all-zero quaternion clears runtime tare.
+     * 使用全零四元数执行 Set Reorientation 可清除运行时 Tare。 */
+    parameters[0] = 2U;
+    return send_command_and_wait(COMMAND_TARE, parameters);
+}
+
 /** Streaming fast path: one I/O/parser entry for all enabled reports.
  *  流式快速路径：所有已启用报告共用一个收包与解析入口。 */
 BNO085_Status_t BNO085_Poll(uint32_t timeout_ms, uint32_t *events)
@@ -909,7 +1389,9 @@ BNO085_Status_t BNO085_Poll(uint32_t timeout_ms, uint32_t *events)
         if (status != BNO085_OK) {
             return status;
         }
-        status = parse_sensor_payload(cargo_buffer, length, events);
+        status = parse_sensor_payload(cargo_buffer, length,
+                                      BNO085_Port_GetTimeMs() * 1000U,
+                                      events);
         if (status != BNO085_OK) {
             return status;
         }
@@ -944,6 +1426,7 @@ BNO085_Status_t BNO085_PollAsync(uint32_t *events)
          * are separate DMA operations only because cargo length is in header.
          * 一个物理包只拉低一次 CS；因长度位于包头，DMA 分两段启动。 */
         BNO085_Port_SetChipSelect(true);
+        async_packet_timestamp_us = BNO085_Port_GetTimeMs() * 1000U;
         async_rx_state = ASYNC_RX_HEADER;
         status = async_rx_start(async_header, sizeof(async_header), false);
         if (status != BNO085_PENDING) {
@@ -956,12 +1439,14 @@ BNO085_Status_t BNO085_PollAsync(uint32_t *events)
     port_status = BNO085_Port_SPITransferAsyncStatus();
     if (port_status == BNO085_PORT_ASYNC_BUSY) {
         if (timed_out(async_transfer_start_ms, SPI_TIMEOUT_MS)) {
+            diagnostics.dma_timeouts++;
             async_rx_stop();
             return BNO085_ERR_TIMEOUT;
         }
         return BNO085_PENDING;
     }
     if (port_status != BNO085_PORT_ASYNC_COMPLETE) {
+        record_port_error();
         async_rx_stop();
         return BNO085_ERR_PORT;
     }
@@ -974,6 +1459,7 @@ BNO085_Status_t BNO085_PollAsync(uint32_t *events)
             (raw_length == 0xFFFFU) ||
             (async_header[2] >= SHTP_CHANNEL_COUNT)) {
             async_rx_stop();
+            diagnostics.invalid_packets++;
             return BNO085_ERR_INVALID_REPORT;
         }
 
@@ -982,6 +1468,8 @@ BNO085_Status_t BNO085_PollAsync(uint32_t *events)
         async_copied = 0U;
         async_channel = async_header[2];
         async_continuation = ((async_header[1] & 0x80U) != 0U);
+        record_shtp_header(async_channel, async_header[3],
+                           async_continuation);
         if (async_remaining == 0U) {
             async_rx_stop();
             return BNO085_OK;
@@ -1015,13 +1503,15 @@ BNO085_Status_t BNO085_PollAsync(uint32_t *events)
         return BNO085_ERR_BUFFER_TOO_SMALL;
     }
     if (async_continuation) {
+        diagnostics.invalid_packets++;
         return BNO085_ERR_INVALID_REPORT;
     }
     if (async_channel != CHANNEL_NON_WAKE) {
         /* Control/executable traffic is harmless during streaming. / 流式阶段忽略其他通道。 */
         return BNO085_OK;
     }
-    return parse_sensor_payload(cargo_buffer, async_cargo_length, events);
+    return parse_sensor_payload(cargo_buffer, async_cargo_length,
+                                async_packet_timestamp_us, events);
 }
 
 /* Cached snapshot getters: deliberately no SPI/HAL calls.
@@ -1175,6 +1665,62 @@ BNO085_Status_t BNO085_GetGameEuler(BNO085_Euler_t *value)
     if (value == NULL) return BNO085_ERR_BAD_PARAM;
     if (!have_game_euler) return BNO085_ERR_NO_DATA;
     *value = latest_game_euler;
+    return BNO085_OK;
+}
+
+BNO085_Status_t BNO085_GetLinearAcceleration(BNO085_LinearAcceleration_t *value)
+{
+    if (value == NULL) return BNO085_ERR_BAD_PARAM;
+    if (!have_linear_acceleration) return BNO085_ERR_NO_DATA;
+    *value = latest_linear_acceleration;
+    return BNO085_OK;
+}
+
+BNO085_Status_t BNO085_GetGravity(BNO085_Gravity_t *value)
+{
+    if (value == NULL) return BNO085_ERR_BAD_PARAM;
+    if (!have_gravity) return BNO085_ERR_NO_DATA;
+    *value = latest_gravity;
+    return BNO085_OK;
+}
+
+BNO085_Status_t BNO085_GetUncalibratedGyroscope(BNO085_UncalibratedGyroscope_t *value)
+{
+    if (value == NULL) return BNO085_ERR_BAD_PARAM;
+    if (!have_uncalibrated_gyroscope) return BNO085_ERR_NO_DATA;
+    *value = latest_uncalibrated_gyroscope;
+    return BNO085_OK;
+}
+
+BNO085_Status_t BNO085_GetUncalibratedMagnetometer(BNO085_UncalibratedMagnetometer_t *value)
+{
+    if (value == NULL) return BNO085_ERR_BAD_PARAM;
+    if (!have_uncalibrated_magnetometer) return BNO085_ERR_NO_DATA;
+    *value = latest_uncalibrated_magnetometer;
+    return BNO085_OK;
+}
+
+BNO085_Status_t BNO085_GetRawAccelerometer(BNO085_RawVector_t *value)
+{
+    if (value == NULL) return BNO085_ERR_BAD_PARAM;
+    if (!have_raw_accelerometer) return BNO085_ERR_NO_DATA;
+    *value = latest_raw_accelerometer;
+    return BNO085_OK;
+}
+
+BNO085_Status_t BNO085_GetRawGyroscope(BNO085_RawGyroscope_t *value)
+{
+    if (value == NULL) return BNO085_ERR_BAD_PARAM;
+    if (!have_raw_gyroscope) return BNO085_ERR_NO_DATA;
+    *value = latest_raw_gyroscope;
+    return BNO085_OK;
+}
+
+BNO085_Status_t BNO085_GetRawMagnetometer(BNO085_RawVector_t *value)
+{
+    if (value == NULL) return BNO085_ERR_BAD_PARAM;
+    if (!have_raw_magnetometer) return BNO085_ERR_NO_DATA;
+    *value = latest_raw_magnetometer;
     return BNO085_OK;
 }
 

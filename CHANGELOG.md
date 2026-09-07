@@ -9,6 +9,11 @@
 - Calibrated gyroscope、magnetometer 和 Game Rotation Vector 报告解析与 Getter。
 - STM32 SPI DMA 平台适配 API 和 `BNO085_PollAsync()` 非阻塞收包状态机。
 - DMA 报告速率与核心处理 CPU 时间的实机统计。
+- Get Feature 配置读回、SHTP/传感器双层序号诊断和 SPI/DMA 分级恢复。
+- Base Timestamp、Timestamp Rebase 与 14-bit report delay 采样时间修正。
+- Linear Acceleration、Gravity、uncalibrated gyro/magnetometer 和 Raw ADC API。
+- 动态校准、Save DCD 与 Tare 命令响应匹配 API。
+- PC 端解析/故障注入回归测试及 GitHub Actions。
 
 ### Changed
 

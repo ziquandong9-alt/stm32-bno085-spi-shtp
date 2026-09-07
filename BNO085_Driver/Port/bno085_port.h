@@ -37,6 +37,15 @@ typedef enum {
     BNO085_PORT_ASYNC_ERROR
 } BNO085_PortAsyncStatus_t;
 
+/** Normalized platform I/O failure. / 与芯片厂商无关的平台 I/O 错误。 */
+typedef enum {
+    BNO085_PORT_ERROR_NONE = 0,
+    BNO085_PORT_ERROR_BUSY,
+    BNO085_PORT_ERROR_TIMEOUT,
+    BNO085_PORT_ERROR_SPI,
+    BNO085_PORT_ERROR_DMA
+} BNO085_PortError_t;
+
 /**
  * Start one non-blocking full-duplex transfer while CS is already active.
  * 在 CS 已拉低时启动一次非阻塞全双工传输。
@@ -49,6 +58,12 @@ BNO085_PortAsyncStatus_t BNO085_Port_SPITransferAsyncStatus(void);
 
 /** Abort a pending async transfer during reset/recovery. / 复位恢复时终止异步传输。 */
 void BNO085_Port_SPITransferAsyncAbort(void);
+
+/** Return and clear neither the normalized nor raw last error. / 查询最近错误，不清除。 */
+BNO085_PortError_t BNO085_Port_GetLastError(uint32_t *raw_error);
+
+/** Reinitialize the SPI/DMA peripheral after a transport fault. / 总线故障后重建外设。 */
+bool BNO085_Port_Recover(void);
 
 /** Assert/deassert active-low H_CSN. / 拉低或释放 H_CSN。 */
 void BNO085_Port_SetChipSelect(bool asserted);

@@ -17,6 +17,22 @@ static BNO085_STM32_PortConfig_t port_config;
 static bool port_ready;
 /* Written in HAL IRQ callbacks and read in thread/main context. / ISR 写、主循环读。 */
 static volatile BNO085_PortAsyncStatus_t async_status = BNO085_PORT_ASYNC_IDLE;
+static volatile BNO085_PortError_t last_error = BNO085_PORT_ERROR_NONE;
+static volatile uint32_t last_raw_error;
+
+/** Translate HAL state without leaking HAL types into the portable core. */
+static void capture_hal_error(HAL_StatusTypeDef status, bool dma_operation)
+{
+    last_raw_error = HAL_SPI_GetError(port_config.spi);
+    if (status == HAL_BUSY) {
+        last_error = BNO085_PORT_ERROR_BUSY;
+    } else if (status == HAL_TIMEOUT) {
+        last_error = BNO085_PORT_ERROR_TIMEOUT;
+    } else {
+        last_error = dma_operation ? BNO085_PORT_ERROR_DMA :
+                                     BNO085_PORT_ERROR_SPI;
+    }
+}
 
 bool BNO085_STM32_Port_Init(const BNO085_STM32_PortConfig_t *config)
 {
@@ -32,6 +48,8 @@ bool BNO085_STM32_Port_Init(const BNO085_STM32_PortConfig_t *config)
     port_config = *config;
     port_ready = true;
     async_status = BNO085_PORT_ASYNC_IDLE;
+    last_error = BNO085_PORT_ERROR_NONE;
+    last_raw_error = 0U;
     BNO085_Port_SetChipSelect(false);
     BNO085_Port_SetWake(false);
     BNO085_Port_SetReset(false);
@@ -52,8 +70,17 @@ bool BNO085_Port_SPITransfer(const uint8_t *tx, uint8_t *rx,
     /* BNO085 SPI is full duplex.  HAL requires non-const TxData, hence the
      * cast; this function never modifies the transmit buffer itself.
      * BNO085 SPI 为全双工；HAL 参数不是 const，所以这里仅做类型转换。 */
-    return (HAL_SPI_TransmitReceive(port_config.spi, (uint8_t *)tx, rx,
-                                    length, timeout_ms) == HAL_OK);
+    {
+        HAL_StatusTypeDef status = HAL_SPI_TransmitReceive(
+            port_config.spi, (uint8_t *)tx, rx, length, timeout_ms);
+        if (status != HAL_OK) {
+            capture_hal_error(status, false);
+            return false;
+        }
+    }
+    last_error = BNO085_PORT_ERROR_NONE;
+    last_raw_error = 0U;
+    return true;
 }
 
 bool BNO085_Port_SPITransferAsync(const uint8_t *tx, uint8_t *rx,
@@ -75,6 +102,7 @@ bool BNO085_Port_SPITransferAsync(const uint8_t *tx, uint8_t *rx,
     hal_status = HAL_SPI_TransmitReceive_DMA(port_config.spi, (uint8_t *)tx,
                                              rx, length);
     if (hal_status != HAL_OK) {
+        capture_hal_error(hal_status, true);
         async_status = BNO085_PORT_ASYNC_ERROR;
         return false;
     }
@@ -94,6 +122,43 @@ void BNO085_Port_SPITransferAsyncAbort(void)
     async_status = BNO085_PORT_ASYNC_IDLE;
 }
 
+BNO085_PortError_t BNO085_Port_GetLastError(uint32_t *raw_error)
+{
+    if (raw_error != NULL) {
+        *raw_error = last_raw_error;
+    }
+    return last_error;
+}
+
+bool BNO085_Port_Recover(void)
+{
+    HAL_StatusTypeDef status;
+
+    if (!port_ready) {
+        return false;
+    }
+    BNO085_Port_SetChipSelect(false);
+    BNO085_Port_SetWake(false);
+    (void)HAL_SPI_DMAStop(port_config.spi);
+    status = HAL_SPI_Abort(port_config.spi);
+    if ((status != HAL_OK) && (status != HAL_ERROR)) {
+        capture_hal_error(status, false);
+        return false;
+    }
+    if (HAL_SPI_DeInit(port_config.spi) != HAL_OK) {
+        capture_hal_error(HAL_ERROR, false);
+        return false;
+    }
+    if (HAL_SPI_Init(port_config.spi) != HAL_OK) {
+        capture_hal_error(HAL_ERROR, false);
+        return false;
+    }
+    async_status = BNO085_PORT_ASYNC_IDLE;
+    last_error = BNO085_PORT_ERROR_NONE;
+    last_raw_error = 0U;
+    return true;
+}
+
 /** HAL full-duplex completion hook. / HAL 全双工 DMA 完成回调。 */
 void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
 {
@@ -106,6 +171,7 @@ void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
 void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
 {
     if (port_ready && (hspi == port_config.spi)) {
+        capture_hal_error(HAL_ERROR, true);
         async_status = BNO085_PORT_ASYNC_ERROR;
     }
 }

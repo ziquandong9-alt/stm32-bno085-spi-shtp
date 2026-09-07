@@ -38,6 +38,8 @@ RATE/s: rv=100 game=100 acc=123 gyro=100 mag=25
 - BNO085 硬件复位与 SPI 模式启动
 - 等待 SHTP advertisement 和 SH-2 `reset complete`
 - 按通道维护 SHTP sequence number
+- Set Feature 后通过 Get Feature (`0xFE/0xFC`) 读回并核对固件实际周期
+- SHTP 包序号与各类 sensor report 序号分别统计，便于区分总线丢包和算法丢帧
 - Product ID 请求与多响应包接收
 - Rotation Vector、Game Rotation Vector、calibrated accelerometer、gyroscope 和
   magnetometer 的 Set Feature
@@ -46,11 +48,16 @@ RATE/s: rv=100 game=100 acc=123 gyro=100 mag=25
 - 同一个 SHTP cargo 内多个 sensor report 的遍历
 - 缓冲区不足时仍排空完整设备包，避免后续包错位
 - 超时、无响应和非法包检测
+- SPI/DMA 错误回调、CS 超时释放、总线重建与传感器硬复位三级恢复
+- Base Timestamp、Timestamp Rebase 和 14-bit report delay 采样时间修正
 - Z-Y-X 欧拉角在驱动中只计算一次并缓存
 - Yaw、Roll、Pitch、X/Y/Z 加速度、角速度和磁场的组合与单项 Getter
 - 阻塞式启动接口和 SPI DMA 非阻塞流式接收状态机
 - 超过 1 秒无 Rotation Vector 数据时自动恢复
 - 与 MCU 无关的协议核心和可替换的平台适配层
+- 线性加速度、重力、未校准陀螺仪/磁力计和三类 Raw ADC 报告
+- 动态校准开关、DCD 保存、立即/持久化/清除 Tare 命令及响应匹配
+- PC 端解析/故障注入测试与 GitHub Actions CI
 
 ## 工程结构
 
@@ -138,6 +145,24 @@ if ((BNO085_PollAsync(&events) == BNO085_OK) &&
 }
 ```
 
+可选报告不会在示例中默认全部开启。需要去重力加速度时，只需：
+
+```c
+BNO085_LinearAcceleration_t linear;
+BNO085_EnableLinearAcceleration(10000U);
+
+/* 在 BNO085_EVENT_LINEAR_ACCELERATION 事件后读取缓存。 */
+BNO085_GetLinearAcceleration(&linear);
+```
+
+`timestamp_us` 是以 MCU 捕获 SHTP 包的时刻为基准，再应用 SH-2 Base Timestamp、
+Timestamp Rebase 和报告 delay 得到的采样时刻；Raw 报告还保留传感器自己的
+`sensor_timestamp_us`。计数与最近错误可通过 `BNO085_GetDiagnostics()` 获取。
+
+校准参数稳定后可手动调用 `BNO085_SaveCalibration()`。该函数会写 BNO085 内部
+非易失存储，不应放进循环频繁调用。安装归零可使用 `BNO085_TareNow()`，确认效果后
+再调用 `BNO085_PersistTare()`；运行时撤销使用 `BNO085_ClearTare()`。
+
 `BNO085_PollAsync()` 是高刷新率流式入口，启动 DMA 后立即返回
 `BNO085_PENDING`；`BNO085_Poll()` 保留为启动和简单阻塞式应用的入口。
 两者都会解析收到的所有报告并更新缓存；
@@ -161,6 +186,8 @@ if ((BNO085_PollAsync(&events) == BNO085_OK) &&
 - 收发缓冲改为静态复用，降低任务栈占用。
 - 一个 SHTP cargo 只遍历一次，四元数转欧拉角只计算一次。
 - 所有 Getter 直接读同一帧缓存，调用三个角度 API 不会重复通信或出现帧间错位。
+- Set Feature 读回允许固件按算法能力量化周期；例如实机把加速度 10 ms 请求量化为
+  8 ms，所以实际约 125 Hz，这不是丢帧。
 
 示例把所有流式处理收敛到静态 `bno085_process()`，`while (1)` 中只需
 调用该函数。空闲时是否执行 `WFI`、RTOS 阻塞或其他任务由应用自己决定，
@@ -181,14 +208,28 @@ SPI 的实际优势是总线占用小、主机读取延迟低、可配置报告�
 更多 SH-2 输出；UART-RVC 的优势是协议极简单。另需注意 UART-RVC 不能可靠使用
 BNO085 内部时钟，硬件必须提供外部 32.768 kHz 时钟或晶振。
 
+## 测试
+
+协议解析无需连接硬件即可回归：
+
+```sh
+gcc -std=c11 -Wall -Wextra -Werror \
+  -IBNO085_Driver/Inc -IBNO085_Driver/Port \
+  tests/test_bno085_parser.c -lm -o test_bno085_parser
+./test_bno085_parser
+```
+
+测试覆盖时间戳重基准、定点数解码、多报告 cargo、报告序号缺口以及 SPI/DMA 恢复
+故障注入；GitHub Actions 会在每次 push 和 pull request 自动运行。
+
 ## 坐标和精度说明
 
 示例按 Z-Y-X 顺序计算欧拉角：Yaw 绕 Z，Pitch 绕 Y，Roll 绕 X。实际设备的正方向
 还取决于 BNO085 在机械结构中的安装方向。
 
 Rotation Vector 的 `accuracy` 状态为 0–3。状态为 0 时仍会产生四元数和 YPR，
-但绝对航向不应视为已经校准。如果只需要相对方向且工作环境磁干扰较强，可以考虑
-后续增加 Game Rotation Vector（`0x08`）支持；代价是 Yaw 会随时间产生漂移。
+但绝对航向不应视为已经校准。如果只需要相对方向且工作环境磁干扰较强，可以启用
+已支持的 Game Rotation Vector（`0x08`）；代价是 Yaw 会随时间产生漂移。
 
 ## 为什么这个驱动容易写错
 

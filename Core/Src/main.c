@@ -39,6 +39,10 @@
 #define BNO085_REPORT_INTERVAL_US  10000U
 #define BNO085_MAG_INTERVAL_US     40000U
 #define BNO085_YPR_PRINT_DIVIDER       4U
+#define BNO085_SOFT_ERROR_LIMIT        3U
+/* Set to 1 only when validating every optional report; normal demo stays lean.
+   仅在验证全部可选报告时设为 1；日常示例保持较低总线负载。 */
+#define BNO085_EXTENDED_VALIDATION     0U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -61,6 +65,7 @@ static uint32_t gyro_events_per_second;
 static uint32_t mag_events_per_second;
 static uint32_t stats_start_ms;
 static uint32_t ypr_print_divider;
+static uint32_t consecutive_transport_errors;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -134,6 +139,21 @@ static void BNO085_Start(void)
            product_info.build_number,
            product_info.reset_cause);
 
+    /* Explicitly enable the three normal dynamic calibrators. The command
+       response is matched before startup continues. / 显式启用三类常规动态
+       校准，并等待匹配的命令响应后再继续启动。 */
+    status = BNO085_SetCalibration(BNO085_CAL_ACCELEROMETER |
+                                   BNO085_CAL_GYROSCOPE |
+                                   BNO085_CAL_MAGNETOMETER |
+                                   BNO085_CAL_ON_TABLE);
+    if (status != BNO085_OK)
+    {
+      printf("BNO085 calibration configuration failed: %s (%d)\r\n",
+             BNO085_StatusString(status), status);
+      HAL_Delay(1000U);
+      continue;
+    }
+
     /* Enable the lower-rate magnetic report first.  Subsequent Set Feature
        writes can then fit into gaps between sensor packets more reliably.
        先启用低速磁场报告，让后续配置命令更容易落在报告间隙中。 */
@@ -169,8 +189,16 @@ static void BNO085_Start(void)
     status = BNO085_EnableAccelerometer(BNO085_REPORT_INTERVAL_US);
     if (status != BNO085_OK)
     {
+      BNO085_Diagnostics_t diagnostics;
       printf("BNO085 accelerometer enable failed: %s (%d)\r\n",
              BNO085_StatusString(status), status);
+      if (BNO085_GetDiagnostics(&diagnostics) == BNO085_OK)
+      {
+        printf("Feature 0x%02X interval requested=%lu actual=%lu us\r\n",
+               diagnostics.last_feature_id,
+               diagnostics.requested_interval_us,
+               diagnostics.effective_interval_us);
+      }
       HAL_Delay(1000U);
       continue;
     }
@@ -183,6 +211,23 @@ static void BNO085_Start(void)
       HAL_Delay(1000U);
       continue;
     }
+
+#if BNO085_EXTENDED_VALIDATION
+    status = BNO085_EnableLinearAcceleration(BNO085_MAG_INTERVAL_US);
+    if (status == BNO085_OK) status = BNO085_EnableGravity(BNO085_MAG_INTERVAL_US);
+    if (status == BNO085_OK) status = BNO085_EnableUncalibratedGyroscope(BNO085_MAG_INTERVAL_US);
+    if (status == BNO085_OK) status = BNO085_EnableUncalibratedMagnetometer(BNO085_MAG_INTERVAL_US);
+    if (status == BNO085_OK) status = BNO085_EnableRawAccelerometer(BNO085_MAG_INTERVAL_US);
+    if (status == BNO085_OK) status = BNO085_EnableRawGyroscope(BNO085_MAG_INTERVAL_US);
+    if (status == BNO085_OK) status = BNO085_EnableRawMagnetometer(BNO085_MAG_INTERVAL_US);
+    if (status != BNO085_OK)
+    {
+      printf("BNO085 extended report enable failed: %s (%d)\r\n",
+             BNO085_StatusString(status), status);
+      HAL_Delay(1000U);
+      continue;
+    }
+#endif
 
     /* Do not regard a successful Set Feature write as proof of sensor output.
        Wait until every enabled report has actually been decoded and cached.
@@ -197,12 +242,21 @@ static void BNO085_Start(void)
       BNO085_Gyroscope_t gyro;
       BNO085_Magnetometer_t mag;
       BNO085_Euler_t game_euler;
-      const uint32_t required_events =
+      uint32_t required_events =
           BNO085_EVENT_ROTATION_VECTOR |
           BNO085_EVENT_GAME_ROTATION_VECTOR |
           BNO085_EVENT_ACCELEROMETER |
           BNO085_EVENT_GYROSCOPE |
           BNO085_EVENT_MAGNETOMETER;
+#if BNO085_EXTENDED_VALIDATION
+      required_events |= BNO085_EVENT_LINEAR_ACCELERATION |
+                         BNO085_EVENT_GRAVITY |
+                         BNO085_EVENT_GYROSCOPE_UNCAL |
+                         BNO085_EVENT_MAGNETOMETER_UNCAL |
+                         BNO085_EVENT_RAW_ACCELEROMETER |
+                         BNO085_EVENT_RAW_GYROSCOPE |
+                         BNO085_EVENT_RAW_MAGNETOMETER;
+#endif
 
       do
       {
@@ -238,6 +292,33 @@ static void BNO085_Start(void)
         printf("GAME YPR: yaw=%7.2f roll=%7.2f pitch=%7.2f deg\r\n",
                game_euler.yaw_deg, game_euler.roll_deg,
                game_euler.pitch_deg);
+#if BNO085_EXTENDED_VALIDATION
+        {
+          BNO085_LinearAcceleration_t linear;
+          BNO085_Gravity_t gravity;
+          BNO085_UncalibratedGyroscope_t uncal_gyro;
+          BNO085_UncalibratedMagnetometer_t uncal_mag;
+          BNO085_RawVector_t raw_accel, raw_mag;
+          BNO085_RawGyroscope_t raw_gyro;
+          if ((BNO085_GetLinearAcceleration(&linear) == BNO085_OK) &&
+              (BNO085_GetGravity(&gravity) == BNO085_OK) &&
+              (BNO085_GetUncalibratedGyroscope(&uncal_gyro) == BNO085_OK) &&
+              (BNO085_GetUncalibratedMagnetometer(&uncal_mag) == BNO085_OK) &&
+              (BNO085_GetRawAccelerometer(&raw_accel) == BNO085_OK) &&
+              (BNO085_GetRawGyroscope(&raw_gyro) == BNO085_OK) &&
+              (BNO085_GetRawMagnetometer(&raw_mag) == BNO085_OK))
+          {
+            printf("EXT OK: lin=%.2f grav=%.2f gyro_bias=%.3f mag_bias=%.2f raw=%d/%d/%d\r\n",
+                   linear.x_mps2, gravity.z_mps2,
+                   uncal_gyro.bias_x_rps, uncal_mag.bias_x_uT,
+                   raw_accel.x_counts, raw_gyro.x_counts, raw_mag.x_counts);
+          }
+          else
+          {
+            status = BNO085_ERR_NO_DATA;
+          }
+        }
+#endif
       }
       else if (status == BNO085_OK)
       {
@@ -256,6 +337,7 @@ static void BNO085_Start(void)
       gyro_events_per_second = 0U;
       mag_events_per_second = 0U;
       ypr_print_divider = 0U;
+      consecutive_transport_errors = 0U;
       return;
     }
 
@@ -281,8 +363,29 @@ static void bno085_process(void)
 
   if ((status != BNO085_OK) && (status != BNO085_PENDING))
   {
+    BNO085_Diagnostics_t diagnostics;
+
     printf("BNO085 read failed: %s (%d)\r\n",
            BNO085_StatusString(status), status);
+    consecutive_transport_errors++;
+    if (consecutive_transport_errors >= BNO085_SOFT_ERROR_LIMIT)
+    {
+      /* Tier 2: rebuild only SPI/DMA. SH-2 keeps its enabled reports, making
+         this much cheaper than a sensor reset. / 二级恢复：只重建 SPI/DMA。 */
+      BNO085_Status_t recovery = BNO085_RecoverTransport();
+      if (BNO085_GetDiagnostics(&diagnostics) == BNO085_OK)
+      {
+        printf("BNO085 transport recovery: %s, HAL=0x%08lX\r\n",
+               BNO085_StatusString(recovery), diagnostics.port_raw_error);
+      }
+      consecutive_transport_errors = 0U;
+    }
+  }
+  else if (status == BNO085_OK)
+  {
+    /* One good complete packet proves framing and DMA are synchronized again.
+       一个完整好包说明总线和 DMA 已恢复同步。 */
+    consecutive_transport_errors = 0U;
   }
 
   /* Count decoded reports for a simple one-second hardware sanity check.
@@ -316,6 +419,7 @@ static void bno085_process(void)
     BNO085_Gyroscope_t gyro;
     BNO085_Magnetometer_t mag;
     BNO085_Euler_t game_euler;
+    BNO085_Diagnostics_t diagnostics;
 
     printf("RATE/s: rv=%lu game=%lu acc=%lu gyro=%lu mag=%lu\r\n",
            rv_events_per_second, game_events_per_second,
@@ -331,6 +435,15 @@ static void bno085_process(void)
       printf("GAME YPR: yaw=%7.2f roll=%7.2f pitch=%7.2f deg\r\n",
              game_euler.yaw_deg, game_euler.roll_deg,
              game_euler.pitch_deg);
+    }
+    if (BNO085_GetDiagnostics(&diagnostics) == BNO085_OK)
+    {
+      printf("DIAG: pkt=%lu shtp_gap=%lu sensor_gap=%lu bad=%lu cont=%lu io=%lu dma_to=%lu recover=%lu reset=%lu\r\n",
+             diagnostics.shtp_packets, diagnostics.shtp_sequence_gaps,
+             diagnostics.sensor_sequence_gaps,
+             diagnostics.invalid_packets, diagnostics.continuation_packets,
+             diagnostics.port_errors, diagnostics.dma_timeouts,
+             diagnostics.transport_recoveries, diagnostics.hard_resets);
     }
     stats_start_ms = HAL_GetTick();
     rv_events_per_second = 0U;

@@ -20,12 +20,14 @@ Release/
 *.crf
 *.axf
 *.elf
+*.exe
 *.hex
 *.map
 *.lnp
 *.dep
 *.log
 *.tmp
+tmp/
 *.user
 *.suo
 Thumbs.db

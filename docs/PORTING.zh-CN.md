@@ -20,6 +20,8 @@
 | `BNO085_Port_SPITransferAsync` | 启动一次中断或 DMA 全双工 SPI，不等待完成 |
 | `BNO085_Port_SPITransferAsyncStatus` | 返回异步 SPI 的 idle/busy/complete/error 状态 |
 | `BNO085_Port_SPITransferAsyncAbort` | 复位或恢复时终止未完成异步传输 |
+| `BNO085_Port_GetLastError` | 返回归一化错误和可选的厂商原始错误位 |
+| `BNO085_Port_Recover` | 释放总线并重新初始化 SPI/DMA，不复位 BNO085 |
 | `BNO085_Port_SetChipSelect` | `true` 将 H_CSN 拉低 |
 | `BNO085_Port_SetWake` | `true` 将 WAKE/PS0 拉低 |
 | `BNO085_Port_SetReset` | `true` 将 NRST 拉低 |
