@@ -1,5 +1,7 @@
 # BNO085 SPI driver for STM32 HAL
 
+**简体中文** | [English](README.en.md)
+
 一个经过实机验证的 BNO085 SPI/SHTP 驱动示例，运行于 STM32F407ZG，使用
 STM32 HAL 和 Keil MDK-ARM。驱动核心不依赖 STM32 HAL；当前工程通过独立 STM32
 适配层接入 SPI/GPIO/时基。流式收包使用 SPI1 DMA，示例同时读取
@@ -74,9 +76,13 @@ BNO085/
 ├─ MDK-ARM/
 │  └─ BNO085.uvprojx             Keil 工程
 ├─ docs/DEBUGGING.zh-CN.md       驱动开发复盘和排错记录
+├─ docs/DEBUGGING.en.md          English troubleshooting guide
 ├─ docs/DEVELOPMENT_PROCESS.zh-CN.md 本次实现过程复盘
+├─ docs/DEVELOPMENT_PROCESS.en.md    English development notes
 ├─ docs/DRIVER_WALKTHROUGH.zh-CN.md  逐代码教学
+├─ docs/DRIVER_WALKTHROUGH.en.md     English code walkthrough
 ├─ docs/PORTING.zh-CN.md         新 MCU 适配指南
+├─ docs/PORTING.en.md            English porting guide
 ├─ docs/RELEASE_CHECKLIST.zh-CN.md   发布前检查表
 └─ BNO085.ioc                    STM32CubeMX 配置
 ```
@@ -240,6 +246,9 @@ Rotation Vector 的 `accuracy` 状态为 0–3。状态为 0 时仍会产生四�
 2. 必须等待 SH-2 `reset complete`，不能在 advertisement 后立即 Set Feature。
 
 ## 学习路线
+
+English readers can start with [README.en.md](README.en.md), which links to the
+complete English learning path.
 
 建议按下面顺序阅读：
 

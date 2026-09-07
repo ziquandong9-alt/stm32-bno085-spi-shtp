@@ -129,8 +129,9 @@ feature ID      0x05 (Rotation Vector)
 report interval 10000 us (100 Hz, little-endian)
 ```
 
-它在 CEVA SH-2 API 中是单向操作。验证是否成功的可靠办法不是强依赖紧随其后的
-Get Feature Response，而是在合理超时内等待第一个实际 Rotation Vector report。
+Set Feature 没有独立 ACK。当前驱动随后发送 Get Feature (`0xFE`)，按 feature ID 匹配
+Feature Response (`0xFC`) 并核对固件实际采用的周期；同时仍在合理超时内等待第一个实际
+Rotation Vector report。配置读回与真实数据到达缺一不可，且应允许固件对报告周期做合理量化。
 
 ## 9. Sensor report 的解析
 

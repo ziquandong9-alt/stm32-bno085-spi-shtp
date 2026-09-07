@@ -89,8 +89,9 @@ channel 1 executable 报告 `reset complete`，其 cargo 第一个字节为 `0x0
 ## 5. 启用并解析 Rotation Vector
 
 Rotation Vector 的 Set Feature 命令使用 report ID `0x05`，100 Hz 对应周期 `10000 us`。
-命令发出后，驱动并不把“SPI 写成功”当成“传感器启动成功”，而是继续等待 channel 3 真正出现
-Rotation Vector 报告。
+命令发出后，驱动先用 Get Feature 读回相同 feature ID 和固件实际周期，再继续等待 channel 3
+真正出现 Rotation Vector 报告。它不会把“SPI 写成功”当成“传感器启动成功”，也不会把固件合理的
+周期量化误判成丢帧。
 
 收到报告后按 SH-2 格式解码：
 

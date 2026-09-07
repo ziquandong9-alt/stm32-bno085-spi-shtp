@@ -419,8 +419,11 @@ command[8] = interval_us >> 24;
 10 27 00 00
 ```
 
-Set Feature 本身是单向控制命令。因此示例随后不是等一个“enable OK”字符串，而是真正调用
-`BNO085_Poll()`，直到已启用的 5 种 report event 都真正到达。这是更可靠的功能确认。
+Set Feature 本身没有专门的 ACK。驱动发送后会再发 Get Feature (`0xFE`)，按 feature ID
+匹配 Feature Response (`0xFC`)，并核对固件实际采用的周期。固件可以按算法能力量化周期，
+例如实机把加速度的 `10000 us` 请求量化为 `8000 us`，驱动会记录实际周期并在合理容差内接受。
+示例随后还会调用 `BNO085_Poll()`，直到已启用的 report event 真正到达；“读回配置”和“收到数据”
+共同构成完整的功能确认。
 
 ---
 
@@ -505,9 +508,9 @@ while (cursor < length) {
 `report_length()` 是必要的，因为各报告没有统一长度。遇到未知 ID 或剩余字节不足一个完整报告时，
 立即返回 `BNO085_ERR_INVALID_REPORT`，而不是猜测下一个位置。
 
-`0xFB` Base Timestamp 提供本 cargo 的传感器时间基准。当前驱动把它保存到同一 cargo 后续样本的
-`timestamp_us`；没有进一步应用每个子报告 byte 3 的 delay 修正。如果将来做高精度多传感器时间同步，
-可以在这里扩展，而不需要修改 SPI 层。
+`0xFB` Base Timestamp 提供本 cargo 的时间基准，Timestamp Rebase 会修改后续报告的参考值。
+驱动还会从 status 高位和 byte 3 合成 14-bit report delay，并把它们应用到 MCU 捕获的包时间，
+得到每个样本的 `timestamp_us`。Raw 报告另外保留传感器提供的 `sensor_timestamp_us`。
 
 ---
 
@@ -688,7 +691,8 @@ while (1) {
 last_rotation_ms = HAL_GetTick();
 ```
 
-若超过一秒没有新姿态：
+若连续出现 3 次 SPI/DMA 传输错误，先执行代价较低的中级恢复：释放 CS，并重建 SPI/DMA，
+同时保留 SH-2 报告配置。若超过一秒仍没有新姿态，再执行完整传感器重启：
 
 ```c
 if ((uint32_t)(HAL_GetTick() - last_rotation_ms) >= 1000U) {
@@ -697,7 +701,8 @@ if ((uint32_t)(HAL_GetTick() - last_rotation_ms) >= 1000U) {
 ```
 
 恢复依据特意不是“是否收到任何数据”。即使 accelerometer 还在输出，只要 Rotation Vector 停止，
-应用仍会重新初始化。
+应用仍会重新初始化。`BNO085_GetDiagnostics()` 可进一步区分 SHTP/report 序号缺口、非法包、
+continuation、端口错误、DMA 超时、中级恢复和完整复位，避免遇到单个坏包就盲目重启。
 
 ---
 
