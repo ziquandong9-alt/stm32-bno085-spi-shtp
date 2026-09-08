@@ -19,6 +19,11 @@ target_include_directories(bno085_core
         $<INSTALL_INTERFACE:include>
 )
 target_compile_features(bno085_core PUBLIC c_std_99)
+if(UNIX)
+    # Consumers need libm for atan2f()/asinf() used by Euler conversion.
+    # 欧拉角转换使用 libm，导出目标必须传递该链接依赖。
+    target_link_libraries(bno085_core PUBLIC m)
+endif()
 
 if(BNO085_BUILD_CALLBACK_PORT)
     add_library(bno085_callback_port STATIC

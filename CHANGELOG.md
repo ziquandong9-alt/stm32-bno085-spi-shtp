@@ -29,6 +29,7 @@
 ### Fixed
 
 - 将 Base Timestamp/Rebase 中间运算提升为 64 位，避免 `INT32_MIN` 取负和累加的有符号溢出。
+- CMake 导出目标在 Unix 上传递 `libm` 依赖，避免下游链接 `atan2f`/`asinf` 失败。
 
 ### Changed
 
