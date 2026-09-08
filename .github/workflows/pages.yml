@@ -27,6 +27,8 @@ jobs:
       - run: cmake -S . -B build-docs -DBNO085_BUILD_TESTS=OFF -DBNO085_BUILD_DOCS=ON
       - run: cmake --build build-docs --target docs
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: build-docs/docs/html
