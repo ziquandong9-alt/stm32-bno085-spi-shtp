@@ -952,7 +952,10 @@ static BNO085_Status_t parse_sensor_payload(const uint8_t *payload,
                                              uint32_t *events)
 {
     uint16_t cursor = 0U;
-    int32_t reference_delta_ticks = 0;
+    /* Keep timestamp arithmetic wider than the signed 32-bit wire fields.
+     * This also makes negating INT32_MIN well-defined. / 时间运算使用 64 位，
+     * 避免对 INT32_MIN 取负或累加 rebase 时产生有符号溢出。 */
+    int64_t reference_delta_ticks = 0;
 
     while (cursor < length) {
         uint8_t item_length = report_length(payload[cursor]);
@@ -968,10 +971,10 @@ static BNO085_Status_t parse_sensor_payload(const uint8_t *payload,
              * 有符号基准差以 H_INTN 时刻为参考，单位 100 us。 */
             int32_t delta = read_s32_le(p + 1U);
             if (delta != INT32_MAX) {
-                reference_delta_ticks = -delta;
+                reference_delta_ticks = -(int64_t)delta;
             }
         } else if (p[0] == REPORT_TIMESTAMP_REBASE) {
-            reference_delta_ticks += read_s32_le(p + 1U);
+            reference_delta_ticks += (int64_t)read_s32_le(p + 1U);
         } else if (p[0] == REPORT_ACCELEROMETER) {
             /* Common sensor header: [0]ID [1]seq [2]status [3]delay;
              * vector data begins at byte 4. / 前四字节为通用传感器头。 */
@@ -1169,10 +1172,10 @@ static BNO085_Status_t parse_sensor_payload(const uint8_t *payload,
             /* SH-2 encodes delay as an 8-bit value and a three-bit exponent
              * in status bits 4:2; the final unit is 100 us.
              * delay 为 8 位数值乘 2^指数，指数位于 status[4:2]。 */
-            int32_t delay_ticks = (int32_t)((uint32_t)p[3] <<
+            int64_t delay_ticks = (int64_t)((uint32_t)p[3] <<
                                              ((p[2] >> 2) & 0x07U));
             int64_t adjusted = (int64_t)packet_timestamp_us +
-                ((int64_t)reference_delta_ticks + delay_ticks) * 100LL;
+                (reference_delta_ticks + delay_ticks) * 100LL;
             timestamp_us = (uint32_t)adjusted;
             record_sensor_sequence(p[0], p[1]);
 
@@ -1221,6 +1224,54 @@ static BNO085_Status_t parse_sensor_payload(const uint8_t *payload,
     }
     return BNO085_OK;
 }
+
+#if defined(BNO085_TESTING)
+/* These hooks exist only in the host-test object. They keep private protocol
+ * helpers out of bno085.h and out of production firmware. / 以下钩子仅在主机
+ * 测试构建中存在，不污染公共 API，也不进入量产固件。 */
+BNO085_Status_t BNO085_Test_ParseSensorPayload(const uint8_t *payload,
+                                                uint16_t length,
+                                                uint32_t packet_timestamp_us,
+                                                uint32_t *events)
+{
+    if ((payload == NULL) || (events == NULL)) {
+        return BNO085_ERR_BAD_PARAM;
+    }
+    return parse_sensor_payload(payload, length, packet_timestamp_us, events);
+}
+
+void BNO085_Test_ResetState(void)
+{
+    async_rx_stop();
+    initialized = false;
+    memset(&diagnostics, 0, sizeof(diagnostics));
+    memset(sensor_sequence_valid, 0, sizeof(sensor_sequence_valid));
+    have_rotation_vector = false;
+    have_euler = false;
+    have_acceleration = false;
+    have_gyroscope = false;
+    have_magnetometer = false;
+    have_game_rotation_vector = false;
+    have_game_euler = false;
+    have_linear_acceleration = false;
+    have_gravity = false;
+    have_uncalibrated_gyroscope = false;
+    have_uncalibrated_magnetometer = false;
+    have_raw_accelerometer = false;
+    have_raw_gyroscope = false;
+    have_raw_magnetometer = false;
+    have_tap = false;
+    have_step_counter = false;
+    have_step_detector = false;
+    have_stability = false;
+}
+
+void BNO085_Test_SetTransportActive(void)
+{
+    initialized = true;
+    async_rx_state = ASYNC_RX_CARGO;
+}
+#endif
 
 /** Return the async transport to a safe idle bus state. / 异步传输恢复为空闲总线。 */
 static void async_rx_stop(void)

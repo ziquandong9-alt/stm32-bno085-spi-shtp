@@ -22,6 +22,13 @@
 - channel 4 Wake Report、batch interval、change sensitivity 和 flush API。
 - SDK 无关 Callback Port、新平台模板、CMake 安装导出与 FreeRTOS 示例。
 - Doxygen API 文档和 GitHub Pages 自动部署工作流。
+- GCC/Clang Sanitizer 测试矩阵、Cortex-M4 Arm-GCC 交叉编译和 CMake 安装包消费者测试。
+- 20,000 组确定性异常输入扫描，以及截断报告、未知报告和极端时间戳回归测试。
+- 标准 `BNO085Config.cmake`/`BNO085ConfigVersion.cmake` 安装包支持。
+
+### Fixed
+
+- 将 Base Timestamp/Rebase 中间运算提升为 64 位，避免 `INT32_MIN` 取负和累加的有符号溢出。
 
 ### Changed
 
@@ -29,6 +36,8 @@
 - 将事件、打印、统计和恢复逻辑封装为静态 `bno085_process()`。
 - 取消示例内强制 `WFI`；DMA 未就绪时立即返回，休眠策略由上层应用决定。
 - 公共 API 版本提升为 `0.2.0`，示例统一通过 `BNO085_Process()` 推进流式状态机。
+- 主机测试不再直接包含 `bno085.c`；生产驱动与测试代码分别编译。
+- Issue 模板增加本机路径、用户名和调试器序列号脱敏提醒。
 
 ## [0.1.0] - 2026-09-06
 

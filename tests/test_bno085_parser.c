@@ -5,13 +5,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
+#include "bno085.h"
 #include "bno085_port.h"
-
-/* Include the implementation so this test can exercise private, pure parser
- * helpers without exposing test-only symbols in the public API.
- * 直接纳入实现文件，以测试私有纯解析函数而不污染公共 API。 */
-#include "../BNO085_Driver/Src/bno085.c"
+#include "bno085_test_hooks.h"
 
 static uint32_t fake_time_ms;
 static bool fake_recover_ok = true;
@@ -53,8 +51,8 @@ static void test_timestamp_and_acceleration(void)
     uint32_t events = 0U;
     BNO085_Acceleration_t value;
 
-    assert(parse_sensor_payload(payload, sizeof(payload), 1000000U,
-                                &events) == BNO085_OK);
+    assert(BNO085_Test_ParseSensorPayload(payload, sizeof(payload), 1000000U,
+                                          &events) == BNO085_OK);
     assert((events & BNO085_EVENT_ACCELEROMETER) != 0U);
     assert(BNO085_GetAcceleration(&value) == BNO085_OK);
     assert(close_to(value.x_mps2, 1.0f));
@@ -65,8 +63,8 @@ static void test_timestamp_and_acceleration(void)
     /* status bits 4:2 contain exponent 2: delay = 5 * 2^2 * 100 us. */
     payload[6] = 1U;
     payload[7] = 0x08U;
-    assert(parse_sensor_payload(payload, sizeof(payload), 1000000U,
-                                &events) == BNO085_OK);
+    assert(BNO085_Test_ParseSensorPayload(payload, sizeof(payload), 1000000U,
+                                          &events) == BNO085_OK);
     assert(BNO085_GetAcceleration(&value) == BNO085_OK);
     assert(value.timestamp_us == 992000U);
 }
@@ -89,8 +87,8 @@ static void test_extended_reports_and_gap_counter(void)
     BNO085_UncalibratedGyroscope_t gyro;
     BNO085_UncalibratedMagnetometer_t mag;
 
-    assert(parse_sensor_payload(payload, sizeof(payload), 2000000U,
-                                &events) == BNO085_OK);
+    assert(BNO085_Test_ParseSensorPayload(payload, sizeof(payload), 2000000U,
+                                          &events) == BNO085_OK);
     assert(BNO085_GetLinearAcceleration(&linear) == BNO085_OK);
     assert(BNO085_GetGravity(&gravity) == BNO085_OK);
     assert(BNO085_GetUncalibratedGyroscope(&gyro) == BNO085_OK);
@@ -101,27 +99,33 @@ static void test_extended_reports_and_gap_counter(void)
     assert(close_to(gyro.bias_x_rps, 0.5f));
     assert(close_to(mag.x_uT, 1.0f));
     assert(close_to(mag.bias_x_uT, 0.5f));
-    assert(diagnostics.sensor_sequence_gaps == 1U);
+    {
+        BNO085_Diagnostics_t diagnostics;
+        assert(BNO085_GetDiagnostics(&diagnostics) == BNO085_OK);
+        assert(diagnostics.sensor_sequence_gaps == 1U);
+    }
 }
 
 static void test_transport_recovery_fault_injection(void)
 {
-    uint32_t recoveries = diagnostics.transport_recoveries;
-    uint32_t errors = diagnostics.port_errors;
+    BNO085_Diagnostics_t before;
+    BNO085_Diagnostics_t after;
 
-    initialized = true;
-    async_rx_state = ASYNC_RX_CARGO;
+    assert(BNO085_GetDiagnostics(&before) == BNO085_OK);
+
+    BNO085_Test_SetTransportActive();
     fake_recover_ok = true;
     assert(BNO085_RecoverTransport() == BNO085_OK);
-    assert(async_rx_state == ASYNC_RX_IDLE);
-    assert(diagnostics.transport_recoveries == recoveries + 1U);
+    assert(BNO085_GetDiagnostics(&after) == BNO085_OK);
+    assert(after.transport_recoveries == before.transport_recoveries + 1U);
 
     fake_recover_ok = false;
     fake_port_error = BNO085_PORT_ERROR_DMA;
     fake_raw_error = 0x1234U;
     assert(BNO085_RecoverTransport() == BNO085_ERR_PORT);
-    assert(diagnostics.port_errors == errors + 1U);
-    assert(diagnostics.port_raw_error == 0x1234U);
+    assert(BNO085_GetDiagnostics(&after) == BNO085_OK);
+    assert(after.port_errors == before.port_errors + 1U);
+    assert(after.port_raw_error == 0x1234U);
     fake_recover_ok = true;
 }
 
@@ -141,8 +145,8 @@ static void test_motion_reports_and_runtime_config(void)
     BNO085_Stability_t stability;
     BNO085_Config_t config;
 
-    assert(parse_sensor_payload(payload, sizeof(payload), 3000000U,
-                                &events) == BNO085_OK);
+    assert(BNO085_Test_ParseSensorPayload(payload, sizeof(payload), 3000000U,
+                                          &events) == BNO085_OK);
     assert((events & (BNO085_EVENT_TAP | BNO085_EVENT_STEP_COUNTER |
                       BNO085_EVENT_STEP_DETECTOR |
                       BNO085_EVENT_STABILITY)) ==
@@ -166,14 +170,106 @@ static void test_motion_reports_and_runtime_config(void)
     assert(BNO085_SetConfig(&config) == BNO085_ERR_BAD_PARAM);
 }
 
+static void test_truncated_and_unknown_reports(void)
+{
+    static const uint8_t acceleration[] = {
+        0x01U, 7U, 0U, 0U, 1U, 0U, 2U, 0U, 3U, 0U
+    };
+    uint16_t length;
+
+    for (length = 1U; length < sizeof(acceleration); length++) {
+        uint32_t events = 0U;
+        assert(BNO085_Test_ParseSensorPayload(acceleration, length, 0U,
+                                              &events) ==
+               BNO085_ERR_INVALID_REPORT);
+        assert(events == 0U);
+    }
+    {
+        uint8_t unknown[] = {0xEEU, 0U, 0U, 0U};
+        uint32_t events = 0U;
+        assert(BNO085_Test_ParseSensorPayload(unknown, sizeof(unknown), 0U,
+                                              &events) ==
+               BNO085_ERR_INVALID_REPORT);
+    }
+}
+
+static void test_timestamp_extreme_does_not_overflow(void)
+{
+    uint8_t payload[] = {
+        /* Base timestamp delta = INT32_MIN. / 基准时间差为 INT32_MIN。 */
+        0xFBU, 0U, 0U, 0U, 0x80U,
+        /* Rebase by INT32_MAX, then publish one acceleration sample. */
+        0xFAU, 0xFFU, 0xFFU, 0xFFU, 0x7FU,
+        0x01U, 9U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U
+    };
+    uint32_t events = 0U;
+
+    assert(BNO085_Test_ParseSensorPayload(payload, sizeof(payload), 1U,
+                                          &events) == BNO085_OK);
+    assert((events & BNO085_EVENT_ACCELEROMETER) != 0U);
+}
+
+static uint32_t fuzz_next(uint32_t *state)
+{
+    uint32_t x = *state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *state = x;
+    return x;
+}
+
+/** Deterministic malformed-input sweep. Sanitizer CI turns any out-of-bounds
+ * access or undefined behavior into a test failure. / 确定性异常输入扫描；
+ * Sanitizer 会把越界和未定义行为变成测试失败。 */
+static void test_deterministic_fuzz_inputs(void)
+{
+    uint8_t payload[128];
+    uint32_t state = 0xB0855EEDU;
+    uint32_t iteration;
+
+    for (iteration = 0U; iteration < 20000U; iteration++) {
+        uint16_t length = (uint16_t)(fuzz_next(&state) % sizeof(payload));
+        uint16_t index;
+        uint32_t events = 0U;
+        BNO085_Status_t status;
+
+        for (index = 0U; index < length; index++) {
+            payload[index] = (uint8_t)fuzz_next(&state);
+        }
+        status = BNO085_Test_ParseSensorPayload(payload, length,
+                                                fuzz_next(&state), &events);
+        assert((status == BNO085_OK) ||
+               (status == BNO085_ERR_INVALID_REPORT));
+        assert((events & ~(BNO085_EVENT_ROTATION_VECTOR |
+                           BNO085_EVENT_ACCELEROMETER |
+                           BNO085_EVENT_GYROSCOPE |
+                           BNO085_EVENT_MAGNETOMETER |
+                           BNO085_EVENT_GAME_ROTATION_VECTOR |
+                           BNO085_EVENT_LINEAR_ACCELERATION |
+                           BNO085_EVENT_GRAVITY |
+                           BNO085_EVENT_GYROSCOPE_UNCAL |
+                           BNO085_EVENT_MAGNETOMETER_UNCAL |
+                           BNO085_EVENT_RAW_ACCELEROMETER |
+                           BNO085_EVENT_RAW_GYROSCOPE |
+                           BNO085_EVENT_RAW_MAGNETOMETER |
+                           BNO085_EVENT_TAP |
+                           BNO085_EVENT_STEP_COUNTER |
+                           BNO085_EVENT_STEP_DETECTOR |
+                           BNO085_EVENT_STABILITY)) == 0U);
+    }
+}
+
 int main(void)
 {
-    memset(&diagnostics, 0, sizeof(diagnostics));
-    memset(sensor_sequence_valid, 0, sizeof(sensor_sequence_valid));
+    BNO085_Test_ResetState();
     test_timestamp_and_acceleration();
     test_extended_reports_and_gap_counter();
     test_transport_recovery_fault_injection();
     test_motion_reports_and_runtime_config();
+    test_truncated_and_unknown_reports();
+    test_timestamp_extreme_does_not_overflow();
+    test_deterministic_fuzz_inputs();
     puts("bno085 parser tests: PASS");
     return 0;
 }

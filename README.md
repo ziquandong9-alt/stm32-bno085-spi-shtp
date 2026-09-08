@@ -143,6 +143,17 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
+安装后，下游 CMake 工程可以直接使用：
+
+```cmake
+find_package(BNO085 0.2 CONFIG REQUIRED)
+target_link_libraries(your_target PRIVATE BNO085::Core BNO085::CallbackPort)
+```
+
+CI 会分别用 GCC 和 Clang 在 AddressSanitizer/UndefinedBehaviorSanitizer
+下运行主机测试，用 Arm GNU Toolchain 为 Cortex-M4 编译可移植源码，
+并验证安装后的 `find_package()` 集成路径。
+
 应用入口在 `Core/Src/main.c`。核心调用方式（省略错误处理）：
 
 ```c
@@ -235,14 +246,14 @@ BNO085 内部时钟，硬件必须提供外部 32.768 kHz 时钟或晶振。
 协议解析无需连接硬件即可回归：
 
 ```sh
-gcc -std=c11 -Wall -Wextra -Werror \
-  -IBNO085_Driver/Inc -IBNO085_Driver/Port \
-  tests/test_bno085_parser.c -lm -o test_bno085_parser
-./test_bno085_parser
+cmake -S . -B build -DBNO085_BUILD_TESTS=ON
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
 ```
 
-测试覆盖时间戳重基准、定点数解码、多报告 cargo、报告序号缺口以及 SPI/DMA 恢复
-故障注入；GitHub Actions 会在每次 push 和 pull request 自动运行。
+测试覆盖时间戳重基准与极值、定点数解码、截断/未知报告、20,000 组确定性
+异常输入、多报告 cargo、报告序号缺口以及 SPI/DMA 恢复故障注入；GitHub Actions
+会在每次 push 和 pull request 自动运行。
 
 ## 坐标和精度说明
 

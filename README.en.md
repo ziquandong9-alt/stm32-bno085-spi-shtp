@@ -119,6 +119,17 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
+For an installed package, downstream CMake projects can use:
+
+```cmake
+find_package(BNO085 0.2 CONFIG REQUIRED)
+target_link_libraries(your_target PRIVATE BNO085::Core BNO085::CallbackPort)
+```
+
+The CI matrix builds the host tests with GCC and Clang under AddressSanitizer
+and UndefinedBehaviorSanitizer, compiles the portable sources for Cortex-M4
+with Arm GNU Toolchain, and verifies the installed-package consumer path.
+
 Minimal application flow, with error handling omitted:
 
 ```c
@@ -183,15 +194,15 @@ minimal fixed-format YPR stream is all that is required.
 ## Host tests
 
 ```sh
-gcc -std=c11 -Wall -Wextra -Werror \
-  -IBNO085_Driver/Inc -IBNO085_Driver/Port \
-  tests/test_bno085_parser.c -lm -o test_bno085_parser
-./test_bno085_parser
+cmake -S . -B build -DBNO085_BUILD_TESTS=ON
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
 ```
 
-The test covers timestamp rebasing, fixed-point decoding, multiple reports in
-one payload, report sequence gaps, and injected SPI/DMA recovery faults. CI runs
-it on every push and pull request.
+The tests cover timestamp rebasing and extreme values, fixed-point decoding,
+truncated/unknown reports, 20,000 deterministic malformed payloads, multiple
+reports in one cargo, report sequence gaps, and injected SPI/DMA recovery
+faults. CI runs them on every push and pull request.
 
 ## Learning path
 
@@ -211,6 +222,8 @@ it on every push and pull request.
    latest-sample queues.
 8. [Port architecture](docs/PORT_ARCHITECTURE.en.md) — supported environments
    and the SDK-neutral callback adapter.
+9. [Release checklist](docs/RELEASE_CHECKLIST.en.md) — build, hardware,
+   privacy, licensing, and GitHub checks before tagging a version.
 
 ## Current scope
 

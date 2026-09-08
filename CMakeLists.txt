@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(stm32_bno085_spi_shtp VERSION 0.2.0 LANGUAGES C)
 
+include(CMakePackageConfigHelpers)
+
 option(BNO085_BUILD_TESTS "Build host-side protocol tests" ON)
 option(BNO085_BUILD_DOCS "Enable the Doxygen documentation target" OFF)
 option(BNO085_BUILD_CALLBACK_PORT "Build the SDK-neutral callback port" ON)
@@ -60,11 +62,27 @@ endif()
 install(EXPORT BNO085Targets NAMESPACE BNO085::
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/BNO085)
 
+configure_package_config_file(
+    cmake/BNO085Config.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/BNO085Config.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/BNO085)
+write_basic_package_version_file(
+    ${CMAKE_CURRENT_BINARY_DIR}/BNO085ConfigVersion.cmake
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion)
+install(FILES
+    ${CMAKE_CURRENT_BINARY_DIR}/BNO085Config.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/BNO085ConfigVersion.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/BNO085)
+
 if(BNO085_BUILD_TESTS)
     enable_testing()
-    add_executable(bno085_parser_tests tests/test_bno085_parser.c)
+    add_executable(bno085_parser_tests
+        tests/test_bno085_parser.c
+        BNO085_Driver/Src/bno085.c)
+    target_compile_definitions(bno085_parser_tests PRIVATE BNO085_TESTING=1)
     target_include_directories(bno085_parser_tests PRIVATE
-        BNO085_Driver/Inc BNO085_Driver/Port)
+        BNO085_Driver/Inc BNO085_Driver/Port tests)
     if(NOT MSVC)
         target_compile_options(bno085_parser_tests PRIVATE
             -Wall -Wextra -Werror -Wpedantic)

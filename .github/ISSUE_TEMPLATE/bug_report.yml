@@ -5,7 +5,7 @@ labels: ["bug"]
 body:
   - type: markdown
     attributes:
-      value: "Please include complete logs and hardware details. 请提供完整日志和硬件信息。"
+      value: "Please include complete logs and hardware details, but redact local user names, absolute paths, debugger serial numbers, and other private information. 请提供完整日志和硬件信息，但请删除本机用户名、绝对路径、调试器序列号等隐私信息。"
   - type: input
     id: mcu
     attributes:

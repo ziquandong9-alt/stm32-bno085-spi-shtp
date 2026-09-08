@@ -6,20 +6,61 @@ on:
 
 jobs:
   cmake-and-parser-tests:
+    strategy:
+      matrix:
+        cc: [gcc, clang]
     runs-on: ubuntu-latest
+    env:
+      CC: ${{ matrix.cc }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Configure
-        run: cmake -S . -B build -DBNO085_BUILD_TESTS=ON
+        run: >-
+          cmake -S . -B build
+          -DBNO085_BUILD_TESTS=ON
+          -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
       - name: Build
         run: cmake --build build --parallel
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+  arm-gcc-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Arm GNU Toolchain
+        run: sudo apt-get update && sudo apt-get install --yes gcc-arm-none-eabi
+      - name: Compile portable core for Cortex-M4
+        run: |
+          mkdir build-arm
+          arm-none-eabi-gcc -std=c99 -mcpu=cortex-m4 -mthumb -mfloat-abi=soft \
+            -Wall -Wextra -Werror -Wpedantic \
+            -IBNO085_Driver/Inc -IBNO085_Driver/Port \
+            -c BNO085_Driver/Src/bno085.c -o build-arm/bno085.o
+          arm-none-eabi-gcc -std=c99 -mcpu=cortex-m4 -mthumb -mfloat-abi=soft \
+            -Wall -Wextra -Werror -Wpedantic \
+            -IBNO085_Driver/Port -IBNO085_Driver/Port/Callbacks \
+            -c BNO085_Driver/Port/Callbacks/bno085_port_callbacks.c \
+            -o build-arm/bno085_port_callbacks.o
+
+  cmake-package-consumer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: cmake -S . -B build -DBNO085_BUILD_TESTS=OFF
+      - run: cmake --build build --parallel
+      - run: cmake --install build --prefix "${{ runner.temp }}/bno085-install"
+      - name: Build find_package consumer
+        run: >-
+          cmake -S tests/package_consumer -B build-consumer
+          -DCMAKE_PREFIX_PATH="${{ runner.temp }}/bno085-install"
+      - run: cmake --build build-consumer --parallel
+
   api-docs:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install Doxygen
         run: sudo apt-get update && sudo apt-get install --yes doxygen
       - name: Configure documentation
