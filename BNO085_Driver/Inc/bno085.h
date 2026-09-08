@@ -21,6 +21,12 @@ extern "C" {
 #include <stdbool.h>
 #include <stdint.h>
 
+/** Semantic version of the portable public API. / 可移植公共 API 的语义版本。 */
+#define BNO085_VERSION_MAJOR  0U
+#define BNO085_VERSION_MINOR  2U
+#define BNO085_VERSION_PATCH  0U
+#define BNO085_VERSION_STRING "0.2.0"
+
 /** BNO085_Poll() decoded a new rotation-vector sample. / 收到新姿态样本。 */
 #define BNO085_EVENT_ROTATION_VECTOR  (1UL << 0)
 /** BNO085_Poll() decoded a new accelerometer sample. / 收到新加速度样本。 */
@@ -38,6 +44,10 @@ extern "C" {
 #define BNO085_EVENT_RAW_ACCELEROMETER    (1UL << 9)
 #define BNO085_EVENT_RAW_GYROSCOPE        (1UL << 10)
 #define BNO085_EVENT_RAW_MAGNETOMETER     (1UL << 11)
+#define BNO085_EVENT_TAP                  (1UL << 12)
+#define BNO085_EVENT_STEP_COUNTER         (1UL << 13)
+#define BNO085_EVENT_STEP_DETECTOR        (1UL << 14)
+#define BNO085_EVENT_STABILITY            (1UL << 15)
 /** A SHTP command-channel error list was received. / 收到 SHTP 错误列表。 */
 #define BNO085_EVENT_DIAGNOSTIC           (1UL << 31)
 
@@ -54,6 +64,64 @@ typedef enum {
     BNO085_ERR_NO_DATA,            /**< Getter called before first sample. / 尚无缓存。 */
     BNO085_PENDING                 /**< Async transfer is idle/in progress. / 异步事务尚未完成。 */
 } BNO085_Status_t;
+
+/** Public SH-2 identifiers accepted by BNO085_ConfigureReport().
+ *  BNO085_ConfigureReport() 接受的 SH-2 传感器标识。 */
+typedef enum {
+    BNO085_REPORT_ACCELEROMETER = 0x01,
+    BNO085_REPORT_GYROSCOPE = 0x02,
+    BNO085_REPORT_MAGNETOMETER = 0x03,
+    BNO085_REPORT_LINEAR_ACCELERATION = 0x04,
+    BNO085_REPORT_ROTATION_VECTOR = 0x05,
+    BNO085_REPORT_GRAVITY = 0x06,
+    BNO085_REPORT_GYROSCOPE_UNCALIBRATED = 0x07,
+    BNO085_REPORT_GAME_ROTATION_VECTOR = 0x08,
+    BNO085_REPORT_MAGNETOMETER_UNCALIBRATED = 0x0F,
+    BNO085_REPORT_TAP_DETECTOR = 0x10,
+    BNO085_REPORT_STEP_COUNTER = 0x11,
+    BNO085_REPORT_STABILITY_CLASSIFIER = 0x13,
+    BNO085_REPORT_RAW_ACCELEROMETER = 0x14,
+    BNO085_REPORT_RAW_GYROSCOPE = 0x15,
+    BNO085_REPORT_RAW_MAGNETOMETER = 0x16,
+    BNO085_REPORT_STEP_DETECTOR = 0x17
+} BNO085_ReportId_t;
+
+/** SH-2 Set Feature flags. / SH-2 Set Feature 功能标志。 */
+#define BNO085_FEATURE_CHANGE_RELATIVE     (1U << 0)
+#define BNO085_FEATURE_CHANGE_ENABLED      (1U << 1)
+#define BNO085_FEATURE_WAKEUP_ENABLED      (1U << 2)
+#define BNO085_FEATURE_ALWAYS_ON           (1U << 3)
+#define BNO085_FEATURE_SNIFF_ENABLED       (1U << 4)
+
+/** Complete, portable Set Feature configuration. / 完整且可移植的报告配置。 */
+typedef struct {
+    uint32_t interval_us;        /**< Zero disables the report. / 0 表示关闭。 */
+    uint32_t batch_interval_us;  /**< Zero disables batching. / 0 表示不批处理。 */
+    uint32_t sensor_specific;    /**< Report-specific metadata. / 报告专用字段。 */
+    uint16_t change_sensitivity; /**< Zero selects firmware default. / 0 使用固件默认值。 */
+    uint8_t flags;               /**< BNO085_FEATURE_* bit mask. / 功能标志。 */
+} BNO085_ReportConfig_t;
+
+/** Runtime policy; hardware handles and pins remain in the port layer.
+ *  运行策略配置；硬件句柄和引脚仍属于 Port 层。 */
+typedef struct {
+    uint32_t spi_timeout_ms;
+    uint32_t command_timeout_ms;
+    uint32_t startup_timeout_ms;
+    uint32_t drain_timeout_ms;
+    uint16_t drain_packet_limit;
+    uint8_t feature_retry_count;
+} BNO085_Config_t;
+
+/** Optional callbacks dispatched only by BNO085_Process(). / 可选应用回调。 */
+typedef void (*BNO085_DataCallback_t)(uint32_t events, void *user_context);
+typedef void (*BNO085_ErrorCallback_t)(BNO085_Status_t status,
+                                       void *user_context);
+typedef struct {
+    BNO085_DataCallback_t on_data;
+    BNO085_ErrorCallback_t on_error;
+    void *user_context;
+} BNO085_Callbacks_t;
 
 /** Product and firmware identity returned by SH-2. / SH-2 产品与固件信息。 */
 typedef struct {
@@ -157,6 +225,59 @@ typedef struct {
     uint32_t timestamp_us;
 } BNO085_RawGyroscope_t;
 
+/** Tap detector flags. / Tap 检测方向与单双击标志。 */
+#define BNO085_TAP_X       (1U << 0)
+#define BNO085_TAP_X_POS   (1U << 1)
+#define BNO085_TAP_Y       (1U << 2)
+#define BNO085_TAP_Y_POS   (1U << 3)
+#define BNO085_TAP_Z       (1U << 4)
+#define BNO085_TAP_Z_POS   (1U << 5)
+#define BNO085_TAP_DOUBLE  (1U << 6)
+typedef struct {
+    uint8_t flags;
+    uint8_t accuracy;
+    uint8_t sequence;
+    uint32_t timestamp_us;
+} BNO085_Tap_t;
+
+typedef struct {
+    uint32_t latency_us;
+    uint32_t steps;
+    uint8_t accuracy;
+    uint8_t sequence;
+    uint32_t timestamp_us;
+} BNO085_StepCounter_t;
+
+typedef struct {
+    uint32_t latency_us;
+    uint8_t accuracy;
+    uint8_t sequence;
+    uint32_t timestamp_us;
+} BNO085_StepDetector_t;
+
+typedef enum {
+    BNO085_STABILITY_UNKNOWN = 0,
+    BNO085_STABILITY_ON_TABLE = 1,
+    BNO085_STABILITY_STATIONARY = 2,
+    BNO085_STABILITY_STABLE = 3,
+    BNO085_STABILITY_MOTION = 4
+} BNO085_StabilityClass_t;
+
+typedef struct {
+    BNO085_StabilityClass_t classification;
+    uint8_t accuracy;
+    uint8_t sequence;
+    uint32_t timestamp_us;
+} BNO085_Stability_t;
+
+/** Accuracy snapshot from the latest relevant reports. / 最近校准精度快照。 */
+typedef struct {
+    uint8_t accelerometer;
+    uint8_t gyroscope;
+    uint8_t magnetometer;
+    uint8_t rotation_vector;
+} BNO085_CalibrationStatus_t;
+
 /** Runtime counters for field diagnosis; counters saturate only at uint32 wrap.
  *  现场诊断计数；可用于判断丢包、协议错误和总线恢复是否发生。 */
 typedef struct {
@@ -174,9 +295,17 @@ typedef struct {
     uint32_t port_raw_error;
     uint32_t requested_interval_us;
     uint32_t effective_interval_us;
+    uint32_t requested_batch_interval_us;
+    uint32_t effective_batch_interval_us;
+    uint32_t requested_sensor_specific;
+    uint32_t effective_sensor_specific;
+    uint16_t requested_change_sensitivity;
+    uint16_t effective_change_sensitivity;
     uint8_t last_shtp_error;
     uint8_t last_error_channel;
     uint8_t last_feature_id;
+    uint8_t requested_feature_flags;
+    uint8_t effective_feature_flags;
 } BNO085_Diagnostics_t;
 
 /**
@@ -185,6 +314,13 @@ typedef struct {
  *      必须先初始化平台适配层。
  */
 BNO085_Status_t BNO085_Init(void);
+
+void BNO085_GetDefaultConfig(BNO085_Config_t *config);
+BNO085_Status_t BNO085_SetConfig(const BNO085_Config_t *config);
+BNO085_Status_t BNO085_InitWithConfig(const BNO085_Config_t *config);
+/** Callbacks run in the caller's context; they must not recursively poll.
+ *  回调在调用者上下文执行，不得递归调用 Poll/Process。 */
+void BNO085_SetCallbacks(const BNO085_Callbacks_t *callbacks);
 
 /** Repeat the complete reset/handshake sequence. / 重新执行完整复位和握手。 */
 BNO085_Status_t BNO085_Reset(void);
@@ -220,6 +356,17 @@ BNO085_Status_t BNO085_EnableUncalibratedMagnetometer(uint32_t report_interval_u
 BNO085_Status_t BNO085_EnableRawAccelerometer(uint32_t report_interval_us);
 BNO085_Status_t BNO085_EnableRawGyroscope(uint32_t report_interval_us);
 BNO085_Status_t BNO085_EnableRawMagnetometer(uint32_t report_interval_us);
+BNO085_Status_t BNO085_EnableTapDetector(uint32_t report_interval_us);
+BNO085_Status_t BNO085_EnableStepCounter(uint32_t report_interval_us);
+BNO085_Status_t BNO085_EnableStepDetector(uint32_t report_interval_us);
+BNO085_Status_t BNO085_EnableStabilityClassifier(uint32_t report_interval_us);
+
+BNO085_Status_t BNO085_ConfigureReport(BNO085_ReportId_t report_id,
+                                       const BNO085_ReportConfig_t *config);
+BNO085_Status_t BNO085_GetReportConfig(BNO085_ReportId_t report_id,
+                                       BNO085_ReportConfig_t *config);
+BNO085_Status_t BNO085_DisableReport(BNO085_ReportId_t report_id);
+BNO085_Status_t BNO085_FlushReport(BNO085_ReportId_t report_id);
 
 /** Enable selected MotionEngine calibration algorithms (bitwise OR flags).
  *  启用选定的 MotionEngine 校准算法，各标志可按位或。 */
@@ -269,6 +416,9 @@ BNO085_Status_t BNO085_Poll(uint32_t timeout_ms, uint32_t *events);
  * SPI 完成中断唤醒任务后再次调用。返回 BNO085_OK 表示一个包已完整解析。
  */
 BNO085_Status_t BNO085_PollAsync(uint32_t *events);
+
+/** Advance async I/O and dispatch callbacks. / 推进异步 I/O 并分发回调。 */
+BNO085_Status_t BNO085_Process(uint32_t *events);
 
 /** Return true while active-low H_INTN is asserted. / H_INTN 为低时返回 true。 */
 bool BNO085_DataReady(void);
@@ -321,6 +471,12 @@ BNO085_Status_t BNO085_GetUncalibratedMagnetometer(BNO085_UncalibratedMagnetomet
 BNO085_Status_t BNO085_GetRawAccelerometer(BNO085_RawVector_t *value);
 BNO085_Status_t BNO085_GetRawGyroscope(BNO085_RawGyroscope_t *value);
 BNO085_Status_t BNO085_GetRawMagnetometer(BNO085_RawVector_t *value);
+BNO085_Status_t BNO085_GetTap(BNO085_Tap_t *value);
+BNO085_Status_t BNO085_GetStepCounter(BNO085_StepCounter_t *value);
+BNO085_Status_t BNO085_GetStepDetector(BNO085_StepDetector_t *value);
+BNO085_Status_t BNO085_GetStability(BNO085_Stability_t *value);
+BNO085_Status_t BNO085_GetCalibrationStatus(BNO085_CalibrationStatus_t *value);
+bool BNO085_IsCalibrationReady(uint8_t minimum_accuracy);
 
 /** Human-readable status text for diagnostics. / 将状态码转换为调试字符串。 */
 const char *BNO085_StatusString(BNO085_Status_t status);

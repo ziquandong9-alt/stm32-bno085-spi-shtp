@@ -87,6 +87,7 @@ static void bno085_process(void);
 static void BNO085_Start(void)
 {
   BNO085_STM32_PortConfig_t port;
+  BNO085_Config_t driver_config;
   BNO085_Status_t status;
 
   /* Only this application/port boundary knows STM32 handles and GPIO pins.
@@ -111,7 +112,10 @@ static void BNO085_Start(void)
   {
     /* Hardware reset -> SHTP advertisement -> executable reset-complete.
        硬复位 -> SHTP 广告包 -> executable 通道启动完成。 */
-    status = BNO085_Init();
+    /* Start from portable defaults; applications may tune policy here without
+       editing the protocol core. / 从默认策略开始，应用可集中调整超时与重试。 */
+    BNO085_GetDefaultConfig(&driver_config);
+    status = BNO085_InitWithConfig(&driver_config);
     if (status != BNO085_OK)
     {
       printf("BNO085 init failed: %s (%d)\r\n",
@@ -160,8 +164,25 @@ static void BNO085_Start(void)
     status = BNO085_EnableMagnetometer(BNO085_MAG_INTERVAL_US);
     if (status != BNO085_OK)
     {
+      BNO085_Diagnostics_t diagnostics;
       printf("BNO085 magnetometer enable failed: %s (%d)\r\n",
              BNO085_StatusString(status), status);
+      if (BNO085_GetDiagnostics(&diagnostics) == BNO085_OK)
+      {
+        printf("Feature 0x%02X req/actual: int=%lu/%lu batch=%lu/%lu "
+               "sens=%u/%u spec=%lu/%lu flags=0x%02X/0x%02X\r\n",
+               diagnostics.last_feature_id,
+               diagnostics.requested_interval_us,
+               diagnostics.effective_interval_us,
+               diagnostics.requested_batch_interval_us,
+               diagnostics.effective_batch_interval_us,
+               diagnostics.requested_change_sensitivity,
+               diagnostics.effective_change_sensitivity,
+               diagnostics.requested_sensor_specific,
+               diagnostics.effective_sensor_specific,
+               diagnostics.requested_feature_flags,
+               diagnostics.effective_feature_flags);
+      }
       HAL_Delay(1000U);
       continue;
     }
@@ -359,7 +380,7 @@ static void BNO085_Start(void)
 static void bno085_process(void)
 {
   uint32_t events = 0U;
-  BNO085_Status_t status = BNO085_PollAsync(&events);
+  BNO085_Status_t status = BNO085_Process(&events);
 
   if ((status != BNO085_OK) && (status != BNO085_PENDING))
   {

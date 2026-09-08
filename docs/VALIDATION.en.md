@@ -15,7 +15,7 @@ device identifier.
 ## Build and host test
 
 - Target build: 0 errors, 0 warnings
-- Image size: Code 25524, RO-data 628, RW-data 140, ZI-data 3100 bytes
+- Image size: Code 26772, RO-data 728, RW-data 184, ZI-data 3160 bytes
 - Host parser/fault-injection test: PASS with `-Wall -Wextra -Werror`
 
 ## Streaming observations
@@ -33,7 +33,8 @@ The normal configuration produced approximately:
 The accelerometer difference is explained by Feature Response: the firmware
 selected an 8000 us effective interval for a 10000 us request.
 
-During the validation window, diagnostics reported zero SHTP sequence gaps,
+During the final validation window (more than 8,600 received packets),
+diagnostics reported zero SHTP sequence gaps,
 zero sensor-report gaps, zero invalid packets, zero continuation packets, zero
 port errors, and zero DMA timeouts in the normal report configuration.
 

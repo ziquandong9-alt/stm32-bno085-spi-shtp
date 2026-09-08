@@ -11,6 +11,12 @@ BNO085_Driver/Port/bno085_port.h
 Replace only the implementation under `BNO085_Driver/Port/STM32`, or add a new
 sibling directory for your SDK.
 
+For the shortest integration, compile `Port/Callbacks/bno085_port_callbacks.c`
+and fill `BNO085_CallbackPortConfig_t` with SDK functions. For maximum control
+and minimum call overhead, copy `Port/Template/bno085_port_template.c` into a
+new platform directory and implement the contract directly. The template has a
+deliberate `#error`, so an unfinished port cannot be shipped accidentally.
+
 ## Required platform services
 
 Implement every function declared in `bno085_port.h`:

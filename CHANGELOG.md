@@ -4,22 +4,31 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-08
+
 ### Added
 
 - Calibrated gyroscope、magnetometer 和 Game Rotation Vector 报告解析与 Getter。
 - STM32 SPI DMA 平台适配 API 和 `BNO085_PollAsync()` 非阻塞收包状态机。
 - DMA 报告速率与核心处理 CPU 时间的实机统计。
 - Get Feature 配置读回、SHTP/传感器双层序号诊断和 SPI/DMA 分级恢复。
-- Base Timestamp、Timestamp Rebase 与 14-bit report delay 采样时间修正。
+- Base Timestamp、Timestamp Rebase 与指数编码 report delay 采样时间修正。
 - Linear Acceleration、Gravity、uncalibrated gyro/magnetometer 和 Raw ADC API。
 - 动态校准、Save DCD 与 Tare 命令响应匹配 API。
 - PC 端解析/故障注入回归测试及 GitHub Actions。
+- 统一 `BNO085_Config_t` 运行策略和完整 `BNO085_ReportConfig_t` Set Feature API。
+- `BNO085_Process()` 可选数据/错误回调，并保留原 Poll API 兼容性。
+- Tap、Step Counter、Step Detector 和 Stability Classifier 报告。
+- channel 4 Wake Report、batch interval、change sensitivity 和 flush API。
+- SDK 无关 Callback Port、新平台模板、CMake 安装导出与 FreeRTOS 示例。
+- Doxygen API 文档和 GitHub Pages 自动部署工作流。
 
 ### Changed
 
 - 示例同时请求 RV/Game RV/Accelerometer/Gyroscope 100 Hz 和 Magnetometer 25 Hz。
 - 将事件、打印、统计和恢复逻辑封装为静态 `bno085_process()`。
 - 取消示例内强制 `WFI`；DMA 未就绪时立即返回，休眠策略由上层应用决定。
+- 公共 API 版本提升为 `0.2.0`，示例统一通过 `BNO085_Process()` 推进流式状态机。
 
 ## [0.1.0] - 2026-09-06
 

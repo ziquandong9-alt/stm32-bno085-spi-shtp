@@ -51,7 +51,7 @@ RATE/s: rv=100 game=100 acc=123 gyro=100 mag=25
 - 缓冲区不足时仍排空完整设备包，避免后续包错位
 - 超时、无响应和非法包检测
 - SPI/DMA 错误回调、CS 超时释放、总线重建与传感器硬复位三级恢复
-- Base Timestamp、Timestamp Rebase 和 14-bit report delay 采样时间修正
+- Base Timestamp、Timestamp Rebase 和指数编码 report delay 采样时间修正
 - Z-Y-X 欧拉角在驱动中只计算一次并缓存
 - Yaw、Roll、Pitch、X/Y/Z 加速度、角速度和磁场的组合与单项 Getter
 - 阻塞式启动接口和 SPI DMA 非阻塞流式接收状态机
@@ -60,6 +60,10 @@ RATE/s: rv=100 game=100 acc=123 gyro=100 mag=25
 - 线性加速度、重力、未校准陀螺仪/磁力计和三类 Raw ADC 报告
 - 动态校准开关、DCD 保存、立即/持久化/清除 Tare 命令及响应匹配
 - PC 端解析/故障注入测试与 GitHub Actions CI
+- 统一运行配置、完整 Set Feature（batch/sensitivity/wake flags）与配置读回
+- 可选数据/错误回调和公共 `BNO085_Process()` 服务入口
+- Tap、Step Counter、Step Detector、Stability Classifier 常用运动报告
+- SDK 无关 Callback Port、Port 模板、CMake 与 FreeRTOS 参考示例
 
 ## 工程结构
 
@@ -70,7 +74,9 @@ BNO085/
 │  ├─ Src/bno085.c               与 MCU 无关的 SHTP/SH-2 核心
 │  └─ Port/
 │     ├─ bno085_port.h           核心所需的硬件接口契约
-│     └─ STM32/                  当前 STM32 HAL 适配实现
+│     ├─ STM32/                  当前 STM32 HAL 适配实现
+│     ├─ Callbacks/              SDK 无关的函数表适配层
+│     └─ Template/               新平台 Port 实现模板
 ├─ Core/                         STM32CubeMX 生成代码和应用示例
 ├─ Drivers/                      STM32 HAL/CMSIS
 ├─ MDK-ARM/
@@ -83,6 +89,8 @@ BNO085/
 ├─ docs/DRIVER_WALKTHROUGH.en.md     English code walkthrough
 ├─ docs/PORTING.zh-CN.md         新 MCU 适配指南
 ├─ docs/PORTING.en.md            English porting guide
+├─ examples/                     裸机、日志和 FreeRTOS 参考代码
+├─ CMakeLists.txt                GCC/Clang/CI 构建入口
 ├─ docs/RELEASE_CHECKLIST.zh-CN.md   发布前检查表
 └─ BNO085.ioc                    STM32CubeMX 配置
 ```
@@ -126,6 +134,14 @@ flowchart LR
 2. 选择 target `BNO085`，Build 并烧录。
 3. 以 115200 8-N-1 打开串口。
 4. 上电后先打印 Product ID，随后持续打印 YPR。
+
+主机端或可移植库也可使用 CMake：
+
+```sh
+cmake -S . -B build -DBNO085_BUILD_TESTS=ON
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
 
 应用入口在 `Core/Src/main.c`。核心调用方式（省略错误处理）：
 
@@ -256,6 +272,8 @@ complete English learning path.
 2. [逐代码教学](docs/DRIVER_WALKTHROUGH.zh-CN.md)：从 SPI 配置一直跟到 YPR Getter。
 3. [排错记录](docs/DEBUGGING.zh-CN.md)：根据串口现象快速定位通信层级。
 4. [移植指南](docs/PORTING.zh-CN.md)：为其他 MCU 实现 Port 层。
+5. [配置与回调](docs/CONFIGURATION.zh-CN.md)：集中配置报告、batch 和唤醒行为。
+6. [RTOS 接入](docs/RTOS.zh-CN.md)：单任务独占驱动、通知和队列模式。
 
 ## 项目状态
 

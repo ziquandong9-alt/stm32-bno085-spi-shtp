@@ -15,6 +15,9 @@ Debug/
 Release/
 
 # Generic compiler and local files
+build*/
+cmake-build-*/
+CMakeUserPresets.json
 *.o
 *.d
 *.crf

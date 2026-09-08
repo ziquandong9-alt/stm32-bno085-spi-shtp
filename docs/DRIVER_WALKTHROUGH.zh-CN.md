@@ -509,7 +509,7 @@ while (cursor < length) {
 立即返回 `BNO085_ERR_INVALID_REPORT`，而不是猜测下一个位置。
 
 `0xFB` Base Timestamp 提供本 cargo 的时间基准，Timestamp Rebase 会修改后续报告的参考值。
-驱动还会从 status 高位和 byte 3 合成 14-bit report delay，并把它们应用到 MCU 捕获的包时间，
+驱动还会用 status bits 4:2 作为指数缩放 byte 3 的 report delay，并把结果应用到 MCU 捕获的包时间，
 得到每个样本的 `timestamp_us`。Raw 报告另外保留传感器提供的 `sensor_timestamp_us`。
 
 ---

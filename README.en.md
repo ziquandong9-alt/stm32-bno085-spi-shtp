@@ -51,7 +51,7 @@ DIAG: packet=... shtp_gap=0 sensor_gap=0 bad=0 cont=0 io=0 dma_to=0
 - Calibrated acceleration, angular velocity, and magnetic field reports
 - Linear acceleration, gravity, uncalibrated gyro/magnetometer, and raw sensor
   reports
-- Base Timestamp, Timestamp Rebase, and 14-bit report-delay processing
+- Base Timestamp, Timestamp Rebase, and exponent-encoded report-delay processing
 - Non-blocking two-stage DMA receive: four-byte header followed by payload while
   chip select remains asserted
 - Normalized port errors, DMA timeout protection, bus recovery, and full sensor
@@ -60,6 +60,11 @@ DIAG: packet=... shtp_gap=0 sensor_gap=0 bad=0 cont=0 io=0 dma_to=0
   matching
 - Host-side parser/fault-injection tests and GitHub Actions CI
 - Bilingual comments in the driver-facing code
+- Central runtime policy and complete Set Feature configuration, including
+  batching, sensitivity, wake-up, always-on, and sniff flags
+- Optional data/error callbacks through the public `BNO085_Process()` service
+- Tap, Step Counter, Step Detector, and Stability Classifier reports
+- SDK-neutral callback port, guarded port template, CMake, and FreeRTOS example
 
 ## Repository layout
 
@@ -69,12 +74,16 @@ BNO085_Driver/
 ├─ Src/bno085.c              MCU-independent SHTP/SH-2 core
 └─ Port/
    ├─ bno085_port.h          Hardware abstraction contract
-   └─ STM32/                 STM32 HAL implementation
+   ├─ STM32/                 STM32 HAL implementation
+   ├─ Callbacks/             SDK-neutral function-table adapter
+   └─ Template/              Guarded skeleton for a new MCU port
 Core/                        CubeMX-generated code and example application
 Drivers/                     STM32 HAL and CMSIS
 MDK-ARM/BNO085.uvprojx       Keil project
 docs/                        English and Simplified Chinese guides
 tests/test_bno085_parser.c   Host-side protocol regression tests
+examples/                    Bare-metal, logging, and FreeRTOS patterns
+CMakeLists.txt               Portable library/test/documentation build
 ```
 
 ## Wiring
@@ -101,6 +110,14 @@ must verify them explicitly.
 2. Select the `BNO085` target, build, and program the MCU.
 3. Open the serial port at 115200 8-N-1.
 4. After Product ID is printed, yaw, roll, and pitch should stream continuously.
+
+For the portable library and host tests:
+
+```sh
+cmake -S . -B build -DBNO085_BUILD_TESTS=ON
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
 
 Minimal application flow, with error handling omitted:
 
@@ -188,6 +205,12 @@ it on every push and pull request.
    another MCU or SDK.
 5. [Hardware validation](docs/VALIDATION.en.md) — reproducible build and
    on-board test evidence.
+6. [Configuration and callbacks](docs/CONFIGURATION.en.md) — report batching,
+   wake flags, runtime policy, and event dispatch.
+7. [RTOS integration](docs/RTOS.en.md) — task ownership, notifications, and
+   latest-sample queues.
+8. [Port architecture](docs/PORT_ARCHITECTURE.en.md) — supported environments
+   and the SDK-neutral callback adapter.
 
 ## Current scope
 

@@ -61,6 +61,14 @@ static void test_timestamp_and_acceleration(void)
     assert(close_to(value.y_mps2, -2.0f));
     assert(close_to(value.z_mps2, 0.5f));
     assert(value.timestamp_us == 990500U);
+
+    /* status bits 4:2 contain exponent 2: delay = 5 * 2^2 * 100 us. */
+    payload[6] = 1U;
+    payload[7] = 0x08U;
+    assert(parse_sensor_payload(payload, sizeof(payload), 1000000U,
+                                &events) == BNO085_OK);
+    assert(BNO085_GetAcceleration(&value) == BNO085_OK);
+    assert(value.timestamp_us == 992000U);
 }
 
 static void test_extended_reports_and_gap_counter(void)
@@ -72,7 +80,8 @@ static void test_extended_reports_and_gap_counter(void)
                0x00U, 0x01U, 0U, 0U, 0U, 0U,
         0x0FU, 0U, 0U, 0U, 0x10U, 0U, 0U, 0U, 0U, 0U,
                0x08U, 0U, 0U, 0U, 0U, 0U,
-        0x01U, 2U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U
+        /* Sequence 2 is deliberately absent: the gap counter must advance. */
+        0x01U, 3U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U
     };
     uint32_t events = 0U;
     BNO085_LinearAcceleration_t linear;
@@ -116,6 +125,47 @@ static void test_transport_recovery_fault_injection(void)
     fake_recover_ok = true;
 }
 
+static void test_motion_reports_and_runtime_config(void)
+{
+    uint8_t payload[] = {
+        0x10U, 1U, 2U, 0U, BNO085_TAP_Z | BNO085_TAP_DOUBLE,
+        0x11U, 1U, 1U, 0U, 0x40U, 0x42U, 0x0FU, 0U,
+               0x2AU, 0U, 0U, 0U,
+        0x13U, 1U, 3U, 0U, BNO085_STABILITY_STATIONARY, 0U,
+        0x17U, 1U, 0U, 0U, 0x20U, 0xA1U, 0x07U, 0U
+    };
+    uint32_t events = 0U;
+    BNO085_Tap_t tap;
+    BNO085_StepCounter_t counter;
+    BNO085_StepDetector_t detector;
+    BNO085_Stability_t stability;
+    BNO085_Config_t config;
+
+    assert(parse_sensor_payload(payload, sizeof(payload), 3000000U,
+                                &events) == BNO085_OK);
+    assert((events & (BNO085_EVENT_TAP | BNO085_EVENT_STEP_COUNTER |
+                      BNO085_EVENT_STEP_DETECTOR |
+                      BNO085_EVENT_STABILITY)) ==
+                     (BNO085_EVENT_TAP | BNO085_EVENT_STEP_COUNTER |
+                      BNO085_EVENT_STEP_DETECTOR |
+                      BNO085_EVENT_STABILITY));
+    assert(BNO085_GetTap(&tap) == BNO085_OK);
+    assert(BNO085_GetStepCounter(&counter) == BNO085_OK);
+    assert(BNO085_GetStepDetector(&detector) == BNO085_OK);
+    assert(BNO085_GetStability(&stability) == BNO085_OK);
+    assert(tap.flags == (BNO085_TAP_Z | BNO085_TAP_DOUBLE));
+    assert(counter.latency_us == 1000000U);
+    assert(counter.steps == 42U);
+    assert(detector.latency_us == 500000U);
+    assert(stability.classification == BNO085_STABILITY_STATIONARY);
+
+    BNO085_GetDefaultConfig(&config);
+    assert(config.feature_retry_count == 2U);
+    assert(BNO085_SetConfig(&config) == BNO085_OK);
+    config.spi_timeout_ms = 0U;
+    assert(BNO085_SetConfig(&config) == BNO085_ERR_BAD_PARAM);
+}
+
 int main(void)
 {
     memset(&diagnostics, 0, sizeof(diagnostics));
@@ -123,6 +173,7 @@ int main(void)
     test_timestamp_and_acceleration();
     test_extended_reports_and_gap_counter();
     test_transport_recovery_fault_injection();
+    test_motion_reports_and_runtime_config();
     puts("bno085 parser tests: PASS");
     return 0;
 }

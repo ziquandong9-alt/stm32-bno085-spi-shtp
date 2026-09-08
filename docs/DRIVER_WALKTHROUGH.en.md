@@ -127,8 +127,8 @@ reports. The parser walks the cargo once, determines each report length, and
 dispatches by report ID.
 
 Timestamp Rebase changes the reference for following reports. Each report also
-has a 14-bit delay split between status bits and a delay byte. The driver applies
-both elements to the MCU-captured packet time to estimate `timestamp_us`.
+encodes delay as byte 3 shifted by the exponent in status bits 4:2. The driver
+applies it to the MCU-captured packet time to estimate `timestamp_us`.
 
 ## 11. Decode fixed-point values
 

@@ -5,14 +5,26 @@ on:
   pull_request:
 
 jobs:
-  parser-tests:
+  cmake-and-parser-tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build parser regression tests
-        run: >-
-          gcc -std=c11 -Wall -Wextra -Werror
-          -IBNO085_Driver/Inc -IBNO085_Driver/Port
-          tests/test_bno085_parser.c -lm -o tests/test_bno085_parser
-      - name: Run parser regression tests
-        run: ./tests/test_bno085_parser
+      - name: Configure
+        run: cmake -S . -B build -DBNO085_BUILD_TESTS=ON
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  api-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure documentation
+        run: cmake -S . -B build-docs -DBNO085_BUILD_TESTS=OFF -DBNO085_BUILD_DOCS=ON
+      - name: Generate documentation
+        run: cmake --build build-docs --target docs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bno085-api-docs
+          path: build-docs/docs/html

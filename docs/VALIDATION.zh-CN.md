@@ -1,6 +1,6 @@
 # 实机验证记录
 
-验证日期：2026-09-07
+验证日期：2026-09-08
 
 ## 环境
 
@@ -17,7 +17,7 @@
 ## 构建结果
 
 ```text
-Program Size: Code=25524 RO-data=628 RW-data=140 ZI-data=3100
+Program Size: Code=26772 RO-data=728 RW-data=184 ZI-data=3160
 "BNO085\BNO085.axf" - 0 Error(s), 0 Warning(s).
 ```
 
@@ -45,7 +45,8 @@ DIAG: pkt=... shtp_gap=0 sensor_gap=0 bad=0 cont=0 io=0 dma_to=0 recover=0 reset
 结果：2.625 MHz SPI DMA 下 Product ID 和 5 种报告均正常；RV、Game RV、
 Gyroscope 稳定在约 100 Hz，Magnetometer 稳定在约 25 Hz；Accelerometer
 虽请求 100 Hz，当前样机实测约 120–128 Hz。DMA 未完成时服务函数立即返回，
-观察窗口内未出现 timeout、invalid report 或自动重启。
+最终观察超过 8600 个物理包，未出现 SHTP/传感器序号跳变、timeout、
+invalid report、I/O 错误、DMA timeout、总线恢复或自动重启。
 
 扩展验证构建把 7 类可选报告临时设为 25 Hz，并在同一块硬件上确认 Getter：
 

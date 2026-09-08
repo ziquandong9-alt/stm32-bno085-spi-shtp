@@ -23,11 +23,12 @@
 #define SHTP_CHANNEL_COUNT               6U
 #define IO_BUFFER_SIZE                 260U
 #define CARGO_BUFFER_SIZE              256U
-#define SPI_TIMEOUT_MS                 100U
-#define COMMAND_TIMEOUT_MS             200U
-#define STARTUP_TIMEOUT_MS            2000U
-#define DRAIN_TIMEOUT_MS               100U
-#define DRAIN_PACKET_LIMIT              32U
+#define DEFAULT_SPI_TIMEOUT_MS          100U
+#define DEFAULT_COMMAND_TIMEOUT_MS      500U
+#define DEFAULT_STARTUP_TIMEOUT_MS     2000U
+#define DEFAULT_DRAIN_TIMEOUT_MS        100U
+#define DEFAULT_DRAIN_PACKET_LIMIT       32U
+#define DEFAULT_FEATURE_RETRY_COUNT       2U
 #define PRODUCT_ID_RESPONSE_COUNT        4U
 #define WAIT_FOREVER            0xFFFFFFFFUL
 
@@ -36,6 +37,7 @@
 #define CHANNEL_EXECUTABLE               1U
 #define CHANNEL_CONTROL                  2U
 #define CHANNEL_NON_WAKE                 3U
+#define CHANNEL_WAKE                     4U
 
 /* SH-2 report identifiers used or safely skipped by this driver.
  * 本驱动需要解析或安全跳过的 SH-2 报告 ID。 */
@@ -48,9 +50,15 @@
 #define REPORT_GYROSCOPE_UNCAL         0x07U
 #define REPORT_GAME_ROTATION_VECTOR    0x08U
 #define REPORT_MAGNETOMETER_UNCAL      0x0FU
+#define REPORT_TAP_DETECTOR            0x10U
+#define REPORT_STEP_COUNTER            0x11U
+#define REPORT_STABILITY_CLASSIFIER    0x13U
 #define REPORT_RAW_ACCELEROMETER       0x14U
 #define REPORT_RAW_GYROSCOPE           0x15U
 #define REPORT_RAW_MAGNETOMETER        0x16U
+#define REPORT_STEP_DETECTOR           0x17U
+#define REPORT_FLUSH_COMPLETE          0xEFU
+#define REPORT_FORCE_FLUSH             0xF0U
 #define REPORT_PRODUCT_ID_RESPONSE     0xF8U
 #define REPORT_PRODUCT_ID_REQUEST      0xF9U
 #define REPORT_SET_FEATURE             0xFDU
@@ -107,6 +115,10 @@ static bool have_uncalibrated_magnetometer;
 static bool have_raw_accelerometer;
 static bool have_raw_gyroscope;
 static bool have_raw_magnetometer;
+static bool have_tap;
+static bool have_step_counter;
+static bool have_step_detector;
+static bool have_stability;
 static BNO085_RotationVector_t latest_rotation_vector;
 static BNO085_Euler_t latest_euler;
 static BNO085_Acceleration_t latest_acceleration;
@@ -121,7 +133,20 @@ static BNO085_UncalibratedMagnetometer_t latest_uncalibrated_magnetometer;
 static BNO085_RawVector_t latest_raw_accelerometer;
 static BNO085_RawGyroscope_t latest_raw_gyroscope;
 static BNO085_RawVector_t latest_raw_magnetometer;
+static BNO085_Tap_t latest_tap;
+static BNO085_StepCounter_t latest_step_counter;
+static BNO085_StepDetector_t latest_step_detector;
+static BNO085_Stability_t latest_stability;
 static BNO085_Diagnostics_t diagnostics;
+static BNO085_Config_t driver_config = {
+    DEFAULT_SPI_TIMEOUT_MS,
+    DEFAULT_COMMAND_TIMEOUT_MS,
+    DEFAULT_STARTUP_TIMEOUT_MS,
+    DEFAULT_DRAIN_TIMEOUT_MS,
+    DEFAULT_DRAIN_PACKET_LIMIT,
+    DEFAULT_FEATURE_RETRY_COUNT
+};
+static BNO085_Callbacks_t driver_callbacks;
 
 /* Non-blocking receive state.  CS remains asserted from the header DMA until
  * the last cargo DMA completes. / 非阻塞收包状态；包头到载荷结束期间 CS 保持低。 */
@@ -278,7 +303,7 @@ static BNO085_Status_t spi_read_bytes(uint8_t *data, uint16_t length)
         /* Zero SHTP length: host has no cargo while clocking device data. */
         memset(io_tx, 0, count);
         if (!BNO085_Port_SPITransfer(io_tx, destination, count,
-                                     SPI_TIMEOUT_MS)) {
+                                     driver_config.spi_timeout_ms)) {
             record_port_error();
             return BNO085_ERR_PORT;
         }
@@ -307,7 +332,7 @@ static BNO085_Status_t spi_write_packet(const uint8_t *header,
         memcpy(io_tx + SHTP_HEADER_SIZE, data, length);
     }
     if (!BNO085_Port_SPITransfer(io_tx, io_rx, packet_length,
-                                 SPI_TIMEOUT_MS)) {
+                                 driver_config.spi_timeout_ms)) {
         record_port_error();
         return BNO085_ERR_PORT;
     }
@@ -408,8 +433,8 @@ static BNO085_Status_t drain_pending_packets(void)
         }
         packet_count++;
         BNO085_Port_DelayMs(1U);
-        if ((packet_count >= DRAIN_PACKET_LIMIT) ||
-            timed_out(start_ms, DRAIN_TIMEOUT_MS)) {
+        if ((packet_count >= driver_config.drain_packet_limit) ||
+            timed_out(start_ms, driver_config.drain_timeout_ms)) {
             return BNO085_ERR_TIMEOUT;
         }
     }
@@ -431,7 +456,7 @@ static BNO085_Status_t wait_for_advertisement(void)
 
     status = read_packet(cargo_buffer, sizeof(cargo_buffer),
                          &cargo_length, &channel, &continuation,
-                         STARTUP_TIMEOUT_MS);
+                         driver_config.startup_timeout_ms);
     if ((status != BNO085_OK) &&
         (status != BNO085_ERR_BUFFER_TOO_SMALL)) {
         return status;
@@ -442,7 +467,7 @@ static BNO085_Status_t wait_for_advertisement(void)
     }
 
     start_ms = BNO085_Port_GetTimeMs();
-    while (!timed_out(start_ms, STARTUP_TIMEOUT_MS)) {
+    while (!timed_out(start_ms, driver_config.startup_timeout_ms)) {
         if (!BNO085_DataReady()) {
             BNO085_Port_DelayMs(1U);
             continue;
@@ -479,9 +504,14 @@ static uint8_t report_length(uint8_t report_id)
         case 0x08U: return 12U;
         case 0x09U: return 14U;
         case 0x0FU: return 16U;
+        case REPORT_TAP_DETECTOR: return 5U;
+        case REPORT_STEP_COUNTER: return 12U;
+        case REPORT_STABILITY_CLASSIFIER: return 6U;
         case 0x14U: return 16U;
         case 0x15U: return 16U;
         case 0x16U: return 16U;
+        case REPORT_STEP_DETECTOR: return 8U;
+        case REPORT_FLUSH_COMPLETE: return 2U;
         case REPORT_COMMAND_RESPONSE: return 16U;
         case REPORT_FRS_READ_RESPONSE: return 16U;
         case REPORT_FRS_WRITE_RESPONSE: return 4U;
@@ -523,6 +553,14 @@ static BNO085_Status_t send_packet(const uint8_t *data, uint16_t length,
     header[2] = channel;
     header[3] = tx_sequence[channel];
 
+    /* A public configuration/command API may be called while streaming DMA
+     * owns the bus. Abort that partial read and restore CS before beginning
+     * the blocking host-write handshake. / 动态配置可能发生在 DMA 收包期间；
+     * 写命令前必须中止该事务并释放 CS，避免两条 SPI 路径同时占用总线。 */
+    if (async_rx_state != ASYNC_RX_IDLE) {
+        async_rx_stop();
+    }
+
     /* A write uses WAKE/H_INTN handshake.  Clear old device-to-host traffic
      * first, then assert WAKE and wait for H_INTN low.
      * 写入前先清旧包，再拉低 WAKE 并等待 H_INTN 拉低。 */
@@ -530,7 +568,7 @@ static BNO085_Status_t send_packet(const uint8_t *data, uint16_t length,
     if (status != BNO085_OK) {
         return status;
     }
-    status = wait_for_interrupt(COMMAND_TIMEOUT_MS, true);
+    status = wait_for_interrupt(driver_config.command_timeout_ms, true);
     if (status != BNO085_OK) {
         return status;
     }
@@ -594,91 +632,211 @@ static BNO085_Status_t receive_channel(uint8_t *buffer, uint16_t *length,
     }
 }
 
+/** Receive either normal or wake sensor traffic. / 接收普通或唤醒传感器通道。 */
+static BNO085_Status_t receive_sensor_packet(uint8_t *buffer,
+                                              uint16_t *length,
+                                              uint32_t timeout_ms)
+{
+    uint16_t capacity;
+    uint32_t start_ms;
+    if ((buffer == NULL) || (length == NULL)) return BNO085_ERR_BAD_PARAM;
+    capacity = *length;
+    start_ms = BNO085_Port_GetTimeMs();
+    for (;;) {
+        uint16_t cargo_length = 0U;
+        uint8_t channel = 0U;
+        bool continuation = false;
+        BNO085_Status_t status = read_packet(buffer, capacity, &cargo_length,
+            &channel, &continuation, remaining_time(start_ms, timeout_ms));
+        if ((status != BNO085_OK) &&
+            (status != BNO085_ERR_BUFFER_TOO_SMALL)) return status;
+        if ((channel == CHANNEL_NON_WAKE) || (channel == CHANNEL_WAKE)) {
+            *length = cargo_length;
+            if (continuation) return BNO085_ERR_INVALID_REPORT;
+            return status;
+        }
+        if (timed_out(start_ms, timeout_ms)) return BNO085_ERR_TIMEOUT;
+    }
+}
+
 /**
  * Emit the 17-byte SH-2 Set Feature command.
  * 发送 17 字节 SH-2 Set Feature 命令；周期字段为小端微秒数。
  */
-static BNO085_Status_t set_report_interval(uint8_t report_id,
-                                            uint32_t interval_us)
+static bool is_supported_sensor_report(uint8_t report_id)
+{
+    switch (report_id) {
+        case REPORT_ACCELEROMETER:
+        case REPORT_GYROSCOPE:
+        case REPORT_MAGNETOMETER:
+        case REPORT_LINEAR_ACCELERATION:
+        case REPORT_ROTATION_VECTOR:
+        case REPORT_GRAVITY:
+        case REPORT_GYROSCOPE_UNCAL:
+        case REPORT_GAME_ROTATION_VECTOR:
+        case REPORT_MAGNETOMETER_UNCAL:
+        case REPORT_TAP_DETECTOR:
+        case REPORT_STEP_COUNTER:
+        case REPORT_STABILITY_CLASSIFIER:
+        case REPORT_RAW_ACCELEROMETER:
+        case REPORT_RAW_GYROSCOPE:
+        case REPORT_RAW_MAGNETOMETER:
+        case REPORT_STEP_DETECTOR:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static BNO085_Status_t get_report_config(uint8_t report_id,
+                                          BNO085_ReportConfig_t *config)
+{
+    uint8_t request[2] = { REPORT_GET_FEATURE_REQUEST, report_id };
+    uint32_t start_ms;
+    BNO085_Status_t status;
+
+    status = send_packet(request, sizeof(request), CHANNEL_CONTROL);
+    if (status != BNO085_OK) return status;
+    start_ms = BNO085_Port_GetTimeMs();
+    while (!timed_out(start_ms, driver_config.command_timeout_ms)) {
+        uint16_t length = sizeof(cargo_buffer);
+        uint16_t cursor = 0U;
+        status = receive_channel(cargo_buffer, &length, CHANNEL_CONTROL,
+            remaining_time(start_ms, driver_config.command_timeout_ms));
+        if (status != BNO085_OK) return status;
+        while (cursor < length) {
+            uint8_t item_length = report_length(cargo_buffer[cursor]);
+            const uint8_t *p = cargo_buffer + cursor;
+            if ((item_length == 0U) ||
+                ((uint16_t)(cursor + item_length) > length)) {
+                diagnostics.invalid_packets++;
+                return BNO085_ERR_INVALID_REPORT;
+            }
+            if ((p[0] == REPORT_GET_FEATURE_RESPONSE) &&
+                (p[1] == report_id)) {
+                config->flags = p[2];
+                config->change_sensitivity = read_u16_le(p + 3U);
+                config->interval_us = read_u32_le(p + 5U);
+                config->batch_interval_us = read_u32_le(p + 9U);
+                config->sensor_specific = read_u32_le(p + 13U);
+                return BNO085_OK;
+            }
+            cursor = (uint16_t)(cursor + item_length);
+        }
+    }
+    return BNO085_ERR_TIMEOUT;
+}
+
+/** Send and verify every SH-2 Set Feature field. / 发送并验证完整报告配置。 */
+static BNO085_Status_t set_report_config(uint8_t report_id,
+                                          const BNO085_ReportConfig_t *config)
 {
     uint8_t command[17];
     uint8_t request[2] = { REPORT_GET_FEATURE_REQUEST, report_id };
     uint8_t attempt;
     BNO085_Status_t last_status = BNO085_ERR_COMMAND_FAILED;
 
-    if (interval_us == 0U) {
-        return BNO085_ERR_BAD_PARAM;
-    }
-    /* Set Feature layout used here / 本驱动使用的 Set Feature 字段:
-     * byte 0: report ID 0xFD
-     * byte 1: sensor feature ID
-     * byte 5..8: report interval in microseconds, little endian
-     * other fields: zero = no batching, default sensitivity. */
+    if ((config == NULL) || !is_supported_sensor_report(report_id) ||
+        ((config->flags & 0xE0U) != 0U)) return BNO085_ERR_BAD_PARAM;
     memset(command, 0, sizeof(command));
     command[0] = REPORT_SET_FEATURE;
     command[1] = report_id;
-    command[5] = (uint8_t)(interval_us & 0xFFU);
-    command[6] = (uint8_t)((interval_us >> 8) & 0xFFU);
-    command[7] = (uint8_t)((interval_us >> 16) & 0xFFU);
-    command[8] = (uint8_t)((interval_us >> 24) & 0xFFU);
-    /* Set Feature has no standalone ACK in SH-2. Verify it by issuing Get
-     * Feature and matching the returned feature ID and effective interval.
-     * SH-2 没有 Set Feature ACK；必须用 Get Feature 读回实际配置。 */
-    for (attempt = 0U; attempt < 2U; attempt++) {
-        BNO085_Status_t status;
+    command[2] = config->flags;
+    command[3] = (uint8_t)config->change_sensitivity;
+    command[4] = (uint8_t)(config->change_sensitivity >> 8);
+    command[5] = (uint8_t)config->interval_us;
+    command[6] = (uint8_t)(config->interval_us >> 8);
+    command[7] = (uint8_t)(config->interval_us >> 16);
+    command[8] = (uint8_t)(config->interval_us >> 24);
+    command[9] = (uint8_t)config->batch_interval_us;
+    command[10] = (uint8_t)(config->batch_interval_us >> 8);
+    command[11] = (uint8_t)(config->batch_interval_us >> 16);
+    command[12] = (uint8_t)(config->batch_interval_us >> 24);
+    command[13] = (uint8_t)config->sensor_specific;
+    command[14] = (uint8_t)(config->sensor_specific >> 8);
+    command[15] = (uint8_t)(config->sensor_specific >> 16);
+    command[16] = (uint8_t)(config->sensor_specific >> 24);
+
+    for (attempt = 0U; attempt < driver_config.feature_retry_count; attempt++) {
         uint32_t start_ms;
+        last_status = send_packet(command, sizeof(command), CHANNEL_CONTROL);
+        if (last_status != BNO085_OK) continue;
+        last_status = send_packet(request, sizeof(request), CHANNEL_CONTROL);
+        if (last_status != BNO085_OK) continue;
 
-        status = send_packet(command, sizeof(command), CHANNEL_CONTROL);
-        if (status != BNO085_OK) {
-            last_status = status;
-            continue;
-        }
-        status = send_packet(request, sizeof(request), CHANNEL_CONTROL);
-        if (status != BNO085_OK) {
-            last_status = status;
-            continue;
-        }
-
+        /* Keep Set Feature and its Get Feature verification in one sequence.
+         * Some firmware revisions process these control transactions as an
+         * ordered pair. / 保持设置与读回确认位于同一控制事务序列。 */
         start_ms = BNO085_Port_GetTimeMs();
-        while (!timed_out(start_ms, COMMAND_TIMEOUT_MS)) {
+        while (!timed_out(start_ms, driver_config.command_timeout_ms)) {
             uint16_t length = sizeof(cargo_buffer);
             uint16_t cursor = 0U;
-            uint32_t remaining = remaining_time(start_ms, COMMAND_TIMEOUT_MS);
-
-            status = receive_channel(cargo_buffer, &length, CHANNEL_CONTROL,
-                                     remaining);
-            if (status != BNO085_OK) {
-                last_status = status;
-                break;
-            }
+            last_status = receive_channel(cargo_buffer, &length,
+                CHANNEL_CONTROL, remaining_time(start_ms,
+                                      driver_config.command_timeout_ms));
+            if (last_status != BNO085_OK) break;
             while (cursor < length) {
                 uint8_t item_length = report_length(cargo_buffer[cursor]);
                 const uint8_t *p = cargo_buffer + cursor;
-
+                BNO085_ReportConfig_t effective;
                 if ((item_length == 0U) ||
                     ((uint16_t)(cursor + item_length) > length)) {
                     diagnostics.invalid_packets++;
-                    status = BNO085_ERR_INVALID_REPORT;
+                    last_status = BNO085_ERR_INVALID_REPORT;
                     break;
                 }
                 if ((p[0] == REPORT_GET_FEATURE_RESPONSE) &&
                     (p[1] == report_id)) {
-                    uint32_t effective_interval = read_u32_le(p + 5U);
+                    effective.flags = p[2];
+                    effective.change_sensitivity = read_u16_le(p + 3U);
+                    effective.interval_us = read_u32_le(p + 5U);
+                    effective.batch_interval_us = read_u32_le(p + 9U);
+                    effective.sensor_specific = read_u32_le(p + 13U);
                     diagnostics.last_feature_id = report_id;
-                    diagnostics.requested_interval_us = interval_us;
-                    diagnostics.effective_interval_us = effective_interval;
-                    /* SH-2 may quantize the request to an algorithm-supported
-                     * period (this BNO085 firmware maps 10 ms to 8 ms for the
-                     * accelerometer). Accept a nonzero result within +/-50%;
-                     * a disabled or wildly different feature still fails.
-                     * SH-2 可把周期量化到算法支持值；允许 50% 范围内的合法取整。 */
-                    if ((effective_interval >= (interval_us / 2U)) &&
-                        (effective_interval <=
-                         (interval_us + (interval_us / 2U)))) {
+                    diagnostics.requested_interval_us = config->interval_us;
+                    diagnostics.effective_interval_us = effective.interval_us;
+                    diagnostics.requested_batch_interval_us =
+                        config->batch_interval_us;
+                    diagnostics.effective_batch_interval_us =
+                        effective.batch_interval_us;
+                    diagnostics.requested_sensor_specific =
+                        config->sensor_specific;
+                    diagnostics.effective_sensor_specific =
+                        effective.sensor_specific;
+                    diagnostics.requested_change_sensitivity =
+                        config->change_sensitivity;
+                    diagnostics.effective_change_sensitivity =
+                        effective.change_sensitivity;
+                    diagnostics.requested_feature_flags = config->flags;
+                    diagnostics.effective_feature_flags = effective.flags;
+                    /* Periods may be quantized by firmware. Discrete values
+                     * explicitly selected by the host must round-trip; zero
+                     * sensitivity/sensor-specific values select defaults.
+                     * 周期允许固件量化；主机显式配置的离散字段必须读回一致，
+                     * 灵敏度和报告专用字段为 0 时则采用固件默认值。 */
+                    if (((config->interval_us == 0U) ?
+                         (effective.interval_us == 0U) :
+                         ((effective.interval_us >=
+                                             config->interval_us / 2U) &&
+                          (effective.interval_us <= config->interval_us +
+                                             config->interval_us / 2U))) &&
+                        ((config->batch_interval_us == 0U) ?
+                         (effective.batch_interval_us == 0U) :
+                         ((effective.batch_interval_us >=
+                                       config->batch_interval_us / 2U) &&
+                          (effective.batch_interval_us <=
+                                       config->batch_interval_us +
+                                       config->batch_interval_us / 2U))) &&
+                        (effective.flags == config->flags) &&
+                        ((config->change_sensitivity == 0U) ||
+                         (effective.change_sensitivity ==
+                                           config->change_sensitivity)) &&
+                        ((config->sensor_specific == 0U) ||
+                         (effective.sensor_specific ==
+                                           config->sensor_specific))) {
                         return BNO085_OK;
                     }
-                    status = BNO085_ERR_COMMAND_FAILED;
-                    last_status = status;
+                    last_status = BNO085_ERR_COMMAND_FAILED;
                     break;
                 }
                 cursor = (uint16_t)(cursor + item_length);
@@ -687,6 +845,15 @@ static BNO085_Status_t set_report_interval(uint8_t report_id,
     }
     diagnostics.feature_verify_failures++;
     return last_status;
+}
+
+static BNO085_Status_t set_report_interval(uint8_t report_id,
+                                            uint32_t interval_us)
+{
+    BNO085_ReportConfig_t config;
+    memset(&config, 0, sizeof(config));
+    config.interval_us = interval_us;
+    return set_report_config(report_id, &config);
 }
 
 /** Send an SH-2 command and match its response by command and sequence.
@@ -713,12 +880,13 @@ static BNO085_Status_t send_command_and_wait(uint8_t command_id,
     }
 
     start_ms = BNO085_Port_GetTimeMs();
-    while (!timed_out(start_ms, 500U)) {
+    while (!timed_out(start_ms, driver_config.command_timeout_ms)) {
         uint16_t length = sizeof(cargo_buffer);
         uint16_t cursor = 0U;
 
         status = receive_channel(cargo_buffer, &length, CHANNEL_CONTROL,
-                                 remaining_time(start_ms, 500U));
+                                 remaining_time(start_ms,
+                                                driver_config.command_timeout_ms));
         if (status != BNO085_OK) {
             return status;
         }
@@ -901,6 +1069,31 @@ static BNO085_Status_t parse_sensor_payload(const uint8_t *payload,
                 (uint8_t)(p[2] & 0x03U);
             have_uncalibrated_magnetometer = true;
             *events |= BNO085_EVENT_MAGNETOMETER_UNCAL;
+        } else if (p[0] == REPORT_TAP_DETECTOR) {
+            latest_tap.flags = p[4];
+            latest_tap.sequence = p[1];
+            latest_tap.accuracy = (uint8_t)(p[2] & 0x03U);
+            have_tap = true;
+            *events |= BNO085_EVENT_TAP;
+        } else if (p[0] == REPORT_STEP_COUNTER) {
+            latest_step_counter.latency_us = read_u32_le(p + 4U);
+            latest_step_counter.steps = read_u32_le(p + 8U);
+            latest_step_counter.sequence = p[1];
+            latest_step_counter.accuracy = (uint8_t)(p[2] & 0x03U);
+            have_step_counter = true;
+            *events |= BNO085_EVENT_STEP_COUNTER;
+        } else if (p[0] == REPORT_STEP_DETECTOR) {
+            latest_step_detector.latency_us = read_u32_le(p + 4U);
+            latest_step_detector.sequence = p[1];
+            latest_step_detector.accuracy = (uint8_t)(p[2] & 0x03U);
+            have_step_detector = true;
+            *events |= BNO085_EVENT_STEP_DETECTOR;
+        } else if (p[0] == REPORT_STABILITY_CLASSIFIER) {
+            latest_stability.classification = (BNO085_StabilityClass_t)p[4];
+            latest_stability.sequence = p[1];
+            latest_stability.accuracy = (uint8_t)(p[2] & 0x03U);
+            have_stability = true;
+            *events |= BNO085_EVENT_STABILITY;
         } else if (p[0] == REPORT_RAW_ACCELEROMETER) {
             latest_raw_accelerometer.x_counts = read_s16_le(p + 4U);
             latest_raw_accelerometer.y_counts = read_s16_le(p + 6U);
@@ -973,8 +1166,11 @@ static BNO085_Status_t parse_sensor_payload(const uint8_t *payload,
         }
         if ((p[0] != REPORT_BASE_TIMESTAMP) &&
             (p[0] != REPORT_TIMESTAMP_REBASE)) {
-            int32_t delay_ticks =
-                (int32_t)(((uint16_t)(p[2] & 0xFCU) << 6) | p[3]);
+            /* SH-2 encodes delay as an 8-bit value and a three-bit exponent
+             * in status bits 4:2; the final unit is 100 us.
+             * delay 为 8 位数值乘 2^指数，指数位于 status[4:2]。 */
+            int32_t delay_ticks = (int32_t)((uint32_t)p[3] <<
+                                             ((p[2] >> 2) & 0x07U));
             int64_t adjusted = (int64_t)packet_timestamp_us +
                 ((int64_t)reference_delta_ticks + delay_ticks) * 100LL;
             timestamp_us = (uint32_t)adjusted;
@@ -1004,6 +1200,14 @@ static BNO085_Status_t parse_sensor_payload(const uint8_t *payload,
                     latest_uncalibrated_gyroscope.timestamp_us = timestamp_us; break;
                 case REPORT_MAGNETOMETER_UNCAL:
                     latest_uncalibrated_magnetometer.timestamp_us = timestamp_us; break;
+                case REPORT_TAP_DETECTOR:
+                    latest_tap.timestamp_us = timestamp_us; break;
+                case REPORT_STEP_COUNTER:
+                    latest_step_counter.timestamp_us = timestamp_us; break;
+                case REPORT_STEP_DETECTOR:
+                    latest_step_detector.timestamp_us = timestamp_us; break;
+                case REPORT_STABILITY_CLASSIFIER:
+                    latest_stability.timestamp_us = timestamp_us; break;
                 case REPORT_RAW_ACCELEROMETER:
                     latest_raw_accelerometer.timestamp_us = timestamp_us; break;
                 case REPORT_RAW_GYROSCOPE:
@@ -1074,6 +1278,41 @@ static BNO085_Status_t async_rx_start_cargo_chunk(void)
 }
 
 /* Public API implementation / 公共 API 实现。 */
+void BNO085_GetDefaultConfig(BNO085_Config_t *config)
+{
+    if (config == NULL) return;
+    config->spi_timeout_ms = DEFAULT_SPI_TIMEOUT_MS;
+    config->command_timeout_ms = DEFAULT_COMMAND_TIMEOUT_MS;
+    config->startup_timeout_ms = DEFAULT_STARTUP_TIMEOUT_MS;
+    config->drain_timeout_ms = DEFAULT_DRAIN_TIMEOUT_MS;
+    config->drain_packet_limit = DEFAULT_DRAIN_PACKET_LIMIT;
+    config->feature_retry_count = DEFAULT_FEATURE_RETRY_COUNT;
+}
+
+BNO085_Status_t BNO085_SetConfig(const BNO085_Config_t *config)
+{
+    if ((config == NULL) || (config->spi_timeout_ms == 0U) ||
+        (config->command_timeout_ms == 0U) ||
+        (config->startup_timeout_ms == 0U) ||
+        (config->drain_timeout_ms == 0U) ||
+        (config->drain_packet_limit == 0U) ||
+        (config->feature_retry_count == 0U)) return BNO085_ERR_BAD_PARAM;
+    driver_config = *config;
+    return BNO085_OK;
+}
+
+BNO085_Status_t BNO085_InitWithConfig(const BNO085_Config_t *config)
+{
+    BNO085_Status_t status = BNO085_SetConfig(config);
+    return (status == BNO085_OK) ? BNO085_Init() : status;
+}
+
+void BNO085_SetCallbacks(const BNO085_Callbacks_t *callbacks)
+{
+    if (callbacks == NULL) memset(&driver_callbacks, 0, sizeof(driver_callbacks));
+    else driver_callbacks = *callbacks;
+}
+
 BNO085_Status_t BNO085_Init(void)
 {
     if (!BNO085_Port_IsReady()) {
@@ -1109,6 +1348,10 @@ BNO085_Status_t BNO085_Reset(void)
     have_raw_accelerometer = false;
     have_raw_gyroscope = false;
     have_raw_magnetometer = false;
+    have_tap = false;
+    have_step_counter = false;
+    have_step_detector = false;
+    have_stability = false;
     memset(tx_sequence, 0, sizeof(tx_sequence));
     memset(rx_sequence, 0, sizeof(rx_sequence));
     memset(rx_sequence_valid, 0, sizeof(rx_sequence_valid));
@@ -1132,6 +1375,10 @@ BNO085_Status_t BNO085_Reset(void)
     memset(&latest_raw_accelerometer, 0, sizeof(latest_raw_accelerometer));
     memset(&latest_raw_gyroscope, 0, sizeof(latest_raw_gyroscope));
     memset(&latest_raw_magnetometer, 0, sizeof(latest_raw_magnetometer));
+    memset(&latest_tap, 0, sizeof(latest_tap));
+    memset(&latest_step_counter, 0, sizeof(latest_step_counter));
+    memset(&latest_step_detector, 0, sizeof(latest_step_detector));
+    memset(&latest_stability, 0, sizeof(latest_stability));
 
     /* PS0 doubles as WAKE after boot.  It must be high while reset is sampled
      * to select SPI together with PS1=high. / 复位采样期间 PS0 必须为高。 */
@@ -1208,7 +1455,8 @@ BNO085_Status_t BNO085_GetProductInfo(BNO085_ProductInfo_t *info)
     for (;;) {
         uint16_t length = sizeof(cargo_buffer);
         uint16_t cursor = 0U;
-        uint32_t remaining = remaining_time(start_ms, 500U);
+        uint32_t remaining = remaining_time(start_ms,
+                                            driver_config.command_timeout_ms);
 
         if (remaining == 0U) {
             return BNO085_ERR_TIMEOUT;
@@ -1310,6 +1558,61 @@ BNO085_Status_t BNO085_EnableRawMagnetometer(uint32_t report_interval_us)
     return set_report_interval(REPORT_RAW_MAGNETOMETER, report_interval_us);
 }
 
+BNO085_Status_t BNO085_EnableTapDetector(uint32_t report_interval_us)
+{
+    return set_report_interval(REPORT_TAP_DETECTOR, report_interval_us);
+}
+
+BNO085_Status_t BNO085_EnableStepCounter(uint32_t report_interval_us)
+{
+    return set_report_interval(REPORT_STEP_COUNTER, report_interval_us);
+}
+
+BNO085_Status_t BNO085_EnableStepDetector(uint32_t report_interval_us)
+{
+    return set_report_interval(REPORT_STEP_DETECTOR, report_interval_us);
+}
+
+BNO085_Status_t BNO085_EnableStabilityClassifier(uint32_t report_interval_us)
+{
+    return set_report_interval(REPORT_STABILITY_CLASSIFIER,
+                               report_interval_us);
+}
+
+BNO085_Status_t BNO085_ConfigureReport(BNO085_ReportId_t report_id,
+                                       const BNO085_ReportConfig_t *config)
+{
+    return set_report_config((uint8_t)report_id, config);
+}
+
+BNO085_Status_t BNO085_GetReportConfig(BNO085_ReportId_t report_id,
+                                       BNO085_ReportConfig_t *config)
+{
+    if ((config == NULL) ||
+        !is_supported_sensor_report((uint8_t)report_id)) {
+        return BNO085_ERR_BAD_PARAM;
+    }
+    return get_report_config((uint8_t)report_id, config);
+}
+
+BNO085_Status_t BNO085_DisableReport(BNO085_ReportId_t report_id)
+{
+    BNO085_ReportConfig_t config;
+    memset(&config, 0, sizeof(config));
+    return set_report_config((uint8_t)report_id, &config);
+}
+
+BNO085_Status_t BNO085_FlushReport(BNO085_ReportId_t report_id)
+{
+    uint8_t request[2];
+    if (!is_supported_sensor_report((uint8_t)report_id)) {
+        return BNO085_ERR_BAD_PARAM;
+    }
+    request[0] = REPORT_FORCE_FLUSH;
+    request[1] = (uint8_t)report_id;
+    return send_packet(request, sizeof(request), CHANNEL_CONTROL);
+}
+
 BNO085_Status_t BNO085_SetCalibration(uint8_t calibration_flags)
 {
     uint8_t parameters[9] = {0};
@@ -1384,8 +1687,7 @@ BNO085_Status_t BNO085_Poll(uint32_t timeout_ms, uint32_t *events)
         if ((remaining == 0U) && !BNO085_DataReady()) {
             return BNO085_ERR_TIMEOUT;
         }
-        status = receive_channel(cargo_buffer, &length, CHANNEL_NON_WAKE,
-                                 remaining);
+        status = receive_sensor_packet(cargo_buffer, &length, remaining);
         if (status != BNO085_OK) {
             return status;
         }
@@ -1438,7 +1740,7 @@ BNO085_Status_t BNO085_PollAsync(uint32_t *events)
 
     port_status = BNO085_Port_SPITransferAsyncStatus();
     if (port_status == BNO085_PORT_ASYNC_BUSY) {
-        if (timed_out(async_transfer_start_ms, SPI_TIMEOUT_MS)) {
+        if (timed_out(async_transfer_start_ms, driver_config.spi_timeout_ms)) {
             diagnostics.dma_timeouts++;
             async_rx_stop();
             return BNO085_ERR_TIMEOUT;
@@ -1506,12 +1808,29 @@ BNO085_Status_t BNO085_PollAsync(uint32_t *events)
         diagnostics.invalid_packets++;
         return BNO085_ERR_INVALID_REPORT;
     }
-    if (async_channel != CHANNEL_NON_WAKE) {
+    if ((async_channel != CHANNEL_NON_WAKE) &&
+        (async_channel != CHANNEL_WAKE)) {
         /* Control/executable traffic is harmless during streaming. / 流式阶段忽略其他通道。 */
         return BNO085_OK;
     }
     return parse_sensor_payload(cargo_buffer, async_cargo_length,
                                 async_packet_timestamp_us, events);
+}
+
+BNO085_Status_t BNO085_Process(uint32_t *events)
+{
+    uint32_t local_events = 0U;
+    BNO085_Status_t status;
+    if (events == NULL) events = &local_events;
+    status = BNO085_PollAsync(events);
+    if ((status == BNO085_OK) && (*events != 0U) &&
+        (driver_callbacks.on_data != NULL)) {
+        driver_callbacks.on_data(*events, driver_callbacks.user_context);
+    } else if ((status != BNO085_OK) && (status != BNO085_PENDING) &&
+               (driver_callbacks.on_error != NULL)) {
+        driver_callbacks.on_error(status, driver_callbacks.user_context);
+    }
+    return status;
 }
 
 /* Cached snapshot getters: deliberately no SPI/HAL calls.
@@ -1722,6 +2041,61 @@ BNO085_Status_t BNO085_GetRawMagnetometer(BNO085_RawVector_t *value)
     if (!have_raw_magnetometer) return BNO085_ERR_NO_DATA;
     *value = latest_raw_magnetometer;
     return BNO085_OK;
+}
+
+BNO085_Status_t BNO085_GetTap(BNO085_Tap_t *value)
+{
+    if (value == NULL) return BNO085_ERR_BAD_PARAM;
+    if (!have_tap) return BNO085_ERR_NO_DATA;
+    *value = latest_tap;
+    return BNO085_OK;
+}
+
+BNO085_Status_t BNO085_GetStepCounter(BNO085_StepCounter_t *value)
+{
+    if (value == NULL) return BNO085_ERR_BAD_PARAM;
+    if (!have_step_counter) return BNO085_ERR_NO_DATA;
+    *value = latest_step_counter;
+    return BNO085_OK;
+}
+
+BNO085_Status_t BNO085_GetStepDetector(BNO085_StepDetector_t *value)
+{
+    if (value == NULL) return BNO085_ERR_BAD_PARAM;
+    if (!have_step_detector) return BNO085_ERR_NO_DATA;
+    *value = latest_step_detector;
+    return BNO085_OK;
+}
+
+BNO085_Status_t BNO085_GetStability(BNO085_Stability_t *value)
+{
+    if (value == NULL) return BNO085_ERR_BAD_PARAM;
+    if (!have_stability) return BNO085_ERR_NO_DATA;
+    *value = latest_stability;
+    return BNO085_OK;
+}
+
+BNO085_Status_t BNO085_GetCalibrationStatus(BNO085_CalibrationStatus_t *value)
+{
+    if (value == NULL) return BNO085_ERR_BAD_PARAM;
+    value->accelerometer = have_acceleration ? latest_acceleration.accuracy : 0U;
+    value->gyroscope = have_gyroscope ? latest_gyroscope.accuracy : 0U;
+    value->magnetometer = have_magnetometer ? latest_magnetometer.accuracy : 0U;
+    value->rotation_vector = have_rotation_vector ?
+                             latest_rotation_vector.accuracy : 0U;
+    return (have_acceleration || have_gyroscope || have_magnetometer ||
+            have_rotation_vector) ? BNO085_OK : BNO085_ERR_NO_DATA;
+}
+
+bool BNO085_IsCalibrationReady(uint8_t minimum_accuracy)
+{
+    if (minimum_accuracy > 3U) return false;
+    return have_acceleration && have_gyroscope && have_magnetometer &&
+           have_rotation_vector &&
+           (latest_acceleration.accuracy >= minimum_accuracy) &&
+           (latest_gyroscope.accuracy >= minimum_accuracy) &&
+           (latest_magnetometer.accuracy >= minimum_accuracy) &&
+           (latest_rotation_vector.accuracy >= minimum_accuracy);
 }
 
 const char *BNO085_StatusString(BNO085_Status_t status)

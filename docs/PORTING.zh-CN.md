@@ -11,6 +11,11 @@
 核心层不包含任何 STM32 头文件。换成其他 MCU 或 RTOS 时，不要修改 `bno085.c`，
 只需为新平台实现 `bno085_port.h` 声明的接口。
 
+最快的方式是编译 `Port/Callbacks/bno085_port_callbacks.c`，再用目标 SDK 的函数填充
+`BNO085_CallbackPortConfig_t`。追求最低调用开销或需要深度控制 IRQ/DMA 时，可复制
+`Port/Template/bno085_port_template.c` 到新的平台目录并直接实现接口。模板保留了故意的
+`#error`，避免尚未实现的 Port 被误发布。
+
 ## 必须实现的接口
 
 | 接口 | 约定 |
