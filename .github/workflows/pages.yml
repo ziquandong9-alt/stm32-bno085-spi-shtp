@@ -1,8 +1,6 @@
 name: API documentation
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -26,9 +24,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install --yes doxygen
       - run: cmake -S . -B build-docs -DBNO085_BUILD_TESTS=OFF -DBNO085_BUILD_DOCS=ON
       - run: cmake --build build-docs --target docs
+      # Enable Settings > Pages > Source: GitHub Actions once before dispatch.
       - uses: actions/configure-pages@v5
-        with:
-          enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: build-docs/docs/html
